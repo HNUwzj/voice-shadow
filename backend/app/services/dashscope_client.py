@@ -1,0 +1,459 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import mimetypes
+import os
+import random
+import re
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
+
+try:
+    from openai import OpenAI
+except Exception:  # pragma: no cover - optional dependency
+    OpenAI = None
+
+try:
+    import dashscope
+    from dashscope.aigc.image_generation import ImageGeneration
+    from dashscope.api_entities.dashscope_response import Message
+except Exception:  # pragma: no cover - optional dependency
+    dashscope = None
+    ImageGeneration = None
+    Message = None
+
+from app.config import settings
+
+
+def _extract_dashscope_image_url(rsp: Any) -> str | None:
+    output = getattr(rsp, "output", None)
+    if output is None and isinstance(rsp, dict):
+        output = rsp.get("output")
+
+    if output is None:
+        return None
+
+    # Newer DashScope response: output.choices[0].message.content[0].image
+    choices = output.get("choices") if isinstance(output, dict) else getattr(output, "choices", None)
+    if isinstance(choices, list) and choices:
+        first_choice = choices[0]
+        message = first_choice.get("message") if isinstance(first_choice, dict) else getattr(first_choice, "message", None)
+        if message is not None:
+            content = message.get("content") if isinstance(message, dict) else getattr(message, "content", None)
+            if isinstance(content, list) and content:
+                first_content = content[0]
+                if isinstance(first_content, dict):
+                    image_url = first_content.get("image")
+                    if isinstance(image_url, str) and image_url:
+                        return image_url
+
+    results = None
+    if isinstance(output, dict):
+        results = output.get("results") or output.get("images")
+    else:
+        results = getattr(output, "results", None) or getattr(output, "images", None)
+
+    if isinstance(results, list) and results:
+        first = results[0]
+        if isinstance(first, dict):
+            for key in ("url", "image_url", "imageUrl"):
+                val = first.get(key)
+                if isinstance(val, str) and val:
+                    return val
+        else:
+            for key in ("url", "image_url", "imageUrl"):
+                val = getattr(first, key, None)
+                if isinstance(val, str) and val:
+                    return val
+    return None
+
+
+def _dashscope_generate_scene_image(scene_prompt: str) -> tuple[str | None, str | None]:
+    if not settings.dashscope_api_key:
+        return None, "未配置 DASHSCOPE_API_KEY。"
+    if dashscope is None or ImageGeneration is None or Message is None:
+        return None, "缺少 dashscope 依赖。"
+
+    dashscope.base_http_api_url = settings.dashscope_base_http_api_url
+    prompt = (
+        "电影感儿童绘本背景图，画面干净、无文字、主体明确。"
+        f"场景要求：{scene_prompt}。"
+        "构图要求：16:9，单一主焦点，细节丰富，不要抽象色块。"
+    )
+
+    try:
+        message = Message(role="user", content=[{"text": prompt}])
+        rsp = ImageGeneration.call(
+            model=settings.dashscope_image_model,
+            api_key=settings.dashscope_api_key,
+            messages=[message],
+            enable_sequential=False,
+            n=1,
+            size=settings.dashscope_image_size,
+        )
+        url = _extract_dashscope_image_url(rsp)
+        if url:
+            return url, None
+
+        err = getattr(rsp, "message", None)
+        if isinstance(err, str) and err:
+            return None, err[:140]
+        return None, "DashScope 未返回图片链接。"
+    except Exception as exc:
+        return None, str(exc)[:140]
+
+
+def _classify_dashscope_error(err: Exception) -> str:
+    msg = str(err).strip()
+    low = msg.lower()
+
+    if any(k in low for k in ["connection refused", "failed to establish", "proxy", "10061", "127.0.0.1:7897"]):
+        return "本地代理不可用，请确认代理已开启且端口为 127.0.0.1:7897。"
+    if any(k in low for k in ["timed out", "timeout", "deadline", "readtimeout", "connecttimeout"]):
+        return "网络超时，请检查网络后重试。"
+    if any(k in low for k in ["api key", "invalid", "permission denied", "unauthorized", "403", "401"]):
+        return "DASHSCOPE_API_KEY 无效或无权限，请到 DashScope 控制台检查 Key 和权限。"
+    if any(k in low for k in ["quota", "resource exhausted", "429", "rate limit", "too many requests"]):
+        return "请求配额不足或触发限流，请到 DashScope 控制台检查配额/套餐后重试。"
+    if any(k in low for k in ["location", "region", "country", "not available"]):
+        return "当前网络区域暂不可用 DashScope 视觉能力。"
+    if not msg:
+        return "未知错误。"
+    return f"{msg[:140]}"
+
+
+def _dashscope_action_hint() -> str:
+    return (
+        "排查建议："
+        "1) 打开阿里云 DashScope 控制台检查 Key 状态；"
+        "2) 检查模型开通情况（例如 qwen3-vl-flash）；"
+        "3) 检查账单、配额与限流配置。"
+    )
+
+
+@contextmanager
+def _vision_proxy_env():
+    proxy = "http://127.0.0.1:7897"
+    keys = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]
+    prev = {k: os.environ.get(k) for k in keys}
+
+    # Force multimodal request through local proxy, while keeping localhost direct.
+    os.environ["HTTP_PROXY"] = proxy
+    os.environ["HTTPS_PROXY"] = proxy
+    os.environ["ALL_PROXY"] = proxy
+
+    no_proxy_parts = ["127.0.0.1", "localhost"]
+    old_no_proxy = prev.get("NO_PROXY")
+    if old_no_proxy:
+        no_proxy_parts.append(old_no_proxy)
+    os.environ["NO_PROXY"] = ",".join(no_proxy_parts)
+
+    try:
+        yield
+    finally:
+        for k, v in prev.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def _image_to_data_url(image_path: Path) -> str:
+    mime = mimetypes.guess_type(str(image_path))[0] or "image/jpeg"
+    data = image_path.read_bytes()
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def _dashscope_openai_vision_praise(image_path: Path, user_text: str) -> tuple[str | None, str | None]:
+    if not settings.dashscope_api_key:
+        return None, "未配置 DASHSCOPE_API_KEY。"
+    if OpenAI is None:
+        return None, "缺少 openai 依赖。"
+
+    prompt = (
+        "你是孩子的爸爸妈妈。"
+        "请基于图片内容和孩子的话，输出2-4句中文口语化夸奖。"
+        "要求具体提到画面里看到的内容，不要编造未出现的元素，不要提文件大小。"
+        f"孩子的话：{user_text}"
+    )
+
+    try:
+        with _vision_proxy_env():
+            client = OpenAI(
+                api_key=settings.dashscope_api_key,
+                base_url=settings.dashscope_compatible_base_url,
+            )
+            image_data_url = _image_to_data_url(image_path)
+            completion = client.chat.completions.create(
+                model=settings.dashscope_vision_model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": image_data_url}},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+                extra_body={
+                    "enable_thinking": settings.dashscope_enable_thinking,
+                    "thinking_budget": 8192,
+                },
+            )
+            choices = getattr(completion, "choices", None) or []
+            if choices:
+                msg = getattr(choices[0], "message", None)
+                text = getattr(msg, "content", None) if msg is not None else None
+                if isinstance(text, str) and text.strip():
+                    return text.strip(), None
+    except Exception as exc:
+        return None, _classify_dashscope_error(exc)
+    return None, "DashScope 视觉返回空结果。"
+
+
+def _dashscope_scene_caption(image_path: Path, user_text: str, praise_reply: str) -> tuple[str | None, str | None]:
+    if not settings.dashscope_api_key:
+        return None, "未配置 DASHSCOPE_API_KEY。"
+    if OpenAI is None:
+        return None, "缺少 openai 依赖。"
+
+    prompt = (
+        "You are extracting visual scene keywords for image generation. "
+        "Based on the image and child text, return ONE short line in English only. "
+        "Strict format: subject=<main object>;setting=<environment>;palette=<3 colors>. "
+        "No extra words, no markdown. "
+        f"Child text: {user_text}. "
+        f"Parent praise: {praise_reply}"
+    )
+
+    try:
+        with _vision_proxy_env():
+            client = OpenAI(
+                api_key=settings.dashscope_api_key,
+                base_url=settings.dashscope_compatible_base_url,
+            )
+            image_data_url = _image_to_data_url(image_path)
+            completion = client.chat.completions.create(
+                model=settings.dashscope_vision_model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": image_data_url}},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+                extra_body={
+                    "enable_thinking": settings.dashscope_enable_thinking,
+                    "thinking_budget": 8192,
+                },
+            )
+            choices = getattr(completion, "choices", None) or []
+            if choices:
+                msg = getattr(choices[0], "message", None)
+                text = getattr(msg, "content", None) if msg is not None else None
+                if isinstance(text, str) and text.strip():
+                    line = re.sub(r"\s+", " ", text.strip())
+                    return line[:180], None
+    except Exception as exc:
+        return None, _classify_dashscope_error(exc)
+    return None, "DashScope 视觉返回空结果。"
+
+
+def _dashscope_openai_chat(messages: list[dict[str, str]], temperature: float) -> tuple[str | None, str | None]:
+    if not settings.dashscope_api_key:
+        return None, "未配置 DASHSCOPE_API_KEY。"
+    if OpenAI is None:
+        return None, "缺少 openai 依赖。"
+
+    normalized_messages: list[dict[str, str]] = []
+    for msg in messages:
+        role = (msg.get("role") or "user").strip()
+        content = msg.get("content", "")
+        if role not in {"system", "user", "assistant"}:
+            role = "user"
+        normalized_messages.append({"role": role, "content": content})
+
+    if not normalized_messages:
+        return None, "对话消息为空。"
+
+    try:
+        with _vision_proxy_env():
+            client = OpenAI(
+                api_key=settings.dashscope_api_key,
+                base_url=settings.dashscope_compatible_base_url,
+            )
+            completion = client.chat.completions.create(
+                model=settings.dashscope_text_model,
+                messages=normalized_messages,
+                temperature=temperature,
+                stream=True,
+                extra_body={"enable_thinking": settings.dashscope_enable_thinking},
+            )
+
+            answer_parts: list[str] = []
+            for chunk in completion:
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                if delta is None:
+                    continue
+                content = getattr(delta, "content", None)
+                if isinstance(content, str) and content:
+                    answer_parts.append(content)
+
+            answer = "".join(answer_parts).strip()
+            if answer:
+                return answer, None
+    except Exception as exc:
+        return None, _classify_dashscope_error(exc)
+
+    return None, "DashScope 文本模型返回空结果。"
+
+
+def _scene_subject_spec(scene_prompt: str) -> tuple[str, str, str]:
+    low = scene_prompt.lower()
+
+    # Prioritize concrete visible objects to avoid generic landscape outputs.
+    mapping = [
+        (["大黄狗", "黄狗", "dog", "puppy"], "a big yellow dog", "park lawn with warm sunlight", "golden, green, soft sky blue"),
+        (["蝴蝶", "butterfly"], "a colorful butterfly", "flower field in spring", "orange, cyan, pink"),
+        (["大黄猫", "小猫", "猫", "cat", "kitten"], "a big yellow cat", "quiet neighborhood path", "honey yellow, mint green, cream"),
+        (["鸟", "bird"], "a small bird", "tree branch in a gentle park", "leaf green, sky blue, warm beige"),
+        (["兔", "rabbit", "bunny"], "a white rabbit", "meadow near wildflowers", "green, white, peach"),
+        (["鱼", "fish"], "a little fish", "clear stream with stones", "aqua, teal, silver"),
+        (["花", "flower"], "bright flowers", "garden path", "coral, yellow, leaf green"),
+    ]
+
+    for keys, subject, setting, palette in mapping:
+        if any(k in scene_prompt for k in keys if any(ord(ch) > 127 for ch in k)) or any(k in low for k in keys if k.isascii()):
+            return subject, setting, palette
+
+    return "a child-friendly outdoor scene", "cozy neighborhood at sunset", "warm orange, soft green, gentle blue"
+
+
+class DashscopeClient:
+    def __init__(self) -> None:
+        self.mock_mode = settings.mock_mode or not settings.dashscope_api_key
+
+    async def chat(self, messages: list[dict[str, str]], temperature: float = 0.6) -> str:
+        if self.mock_mode:
+            return self._mock_chat(messages)
+
+        text, err = await asyncio.wait_for(
+            asyncio.to_thread(_dashscope_openai_chat, messages, temperature),
+            timeout=40,
+        )
+        if text:
+            return text
+        raise RuntimeError(f"DashScope 文本调用失败：{err or '未知错误。'}")
+
+    async def vision_praise(self, image_path: Path, user_text: str) -> str:
+        if not settings.dashscope_api_key:
+            return "图片识别依赖 DashScope 视觉模型，但当前未配置 DASHSCOPE_API_KEY。" + _dashscope_action_hint()
+        if OpenAI is None:
+            return "图片识别依赖 openai SDK，但当前缺少 openai 依赖。" + _dashscope_action_hint()
+        vision_text = None
+        vision_err = None
+        for attempt in range(2):
+            try:
+                vision_text, vision_err = await asyncio.wait_for(
+                    asyncio.to_thread(_dashscope_openai_vision_praise, image_path, user_text),
+                    timeout=35,
+                )
+                if vision_text:
+                    return vision_text
+
+                # Retry once on transient timeout-type failures.
+                if vision_err and "超时" in vision_err and attempt == 0:
+                    await asyncio.sleep(0.8)
+                    continue
+                break
+            except asyncio.TimeoutError:
+                if attempt == 0:
+                    await asyncio.sleep(0.8)
+                    continue
+                return "DashScope 识图失败：网络超时（35秒，已重试1次）。" + _dashscope_action_hint()
+            except Exception as exc:
+                return f"DashScope 识图失败：{_classify_dashscope_error(exc)}" + _dashscope_action_hint()
+        if vision_text:
+            return vision_text
+
+        return f"DashScope 识图失败：{vision_err or '未知错误。'}" + _dashscope_action_hint()
+
+    async def scene_prompt_from_image(self, image_path: Path, user_text: str, praise_reply: str) -> str:
+        # Prefer visual extraction so uploaded-image background is tied to actual picture content.
+        for attempt in range(2):
+            try:
+                cap_text, cap_err = await asyncio.wait_for(
+                    asyncio.to_thread(_dashscope_scene_caption, image_path, user_text, praise_reply),
+                    timeout=30,
+                )
+                if cap_text:
+                    return cap_text
+                if cap_err and "超时" in cap_err and attempt == 0:
+                    await asyncio.sleep(0.6)
+                    continue
+                break
+            except asyncio.TimeoutError:
+                if attempt == 0:
+                    await asyncio.sleep(0.6)
+                    continue
+                break
+            except Exception:
+                break
+
+        # Fallback: still include praise text to keep some semantic relation.
+        merged = f"{user_text} {praise_reply}".strip()
+        return merged[:140] if merged else user_text
+
+    async def generate_scene_image(self, scene_prompt: str) -> str:
+        for attempt in range(2):
+            try:
+                ds_url, ds_err = await asyncio.wait_for(
+                    asyncio.to_thread(_dashscope_generate_scene_image, scene_prompt),
+                    timeout=40,
+                )
+                if ds_url:
+                    return ds_url
+                if ds_err and "timeout" in ds_err.lower() and attempt == 0:
+                    await asyncio.sleep(0.6)
+                    continue
+                break
+            except asyncio.TimeoutError:
+                if attempt == 0:
+                    await asyncio.sleep(0.6)
+                    continue
+                break
+            except Exception:
+                break
+
+        # Fallback for development continuity if DashScope is temporarily unavailable.
+        seed = random.randint(100000, 999999)
+        clean_scene = (scene_prompt or "温馨儿童绘本场景").strip()
+        subject, setting, palette = _scene_subject_spec(clean_scene)
+        prompt = (
+            "children storybook illustration, 2d hand-painted background, "
+            f"main subject: {subject}, "
+            f"scene setting: {setting}, "
+            f"palette: {palette}, "
+            "single clear focal object, rich details, gentle depth, no text, no logo, not abstract, "
+            f"extra context: {clean_scene}"
+        )
+        return (
+            f"https://image.pollinations.ai/prompt/{quote(prompt)}"
+            f"?width=1600&height=900&nologo=true&seed={seed}&model=flux"
+        )
+
+    def _mock_chat(self, messages: list[dict[str, str]]) -> str:
+        last = messages[-1]["content"] if messages else ""
+        return (
+            "我在呢，听你说我很开心。"
+            f"你刚刚提到‘{last[:24]}’，可以再告诉我当时最让你在意的一个细节吗？"
+        )

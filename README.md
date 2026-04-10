@@ -45,10 +45,10 @@ pip install -r requirements.txt
 copy .env.example .env
 ```
 
-可选依赖（启用 Gemini 视觉和 DashScope 文生图时建议安装）：
+可选依赖（启用 DashScope 文生图时建议安装）：
 
 ```powershell
-pip install google-generativeai google-genai dashscope
+pip install dashscope
 ```
 
 启动服务（当前项目默认使用 8001 端口）：
@@ -77,11 +77,11 @@ npm run dev
 
 常用项：
 
-1. MINIMAX_API_KEY：聊天模型 Key
-2. GOOGLE_API_KEY：Gemini Key（用于视觉理解）
-3. GOOGLE_VISION_MODEL：默认 models/gemini-2.5-flash
-4. GOOGLE_SCENE_MODEL：Gemini 图像模型名
-5. DASHSCOPE_API_KEY：阿里云 DashScope Key（用于场景图）
+1. DASHSCOPE_API_KEY：阿里云 DashScope Key（用于文本、视觉理解与场景图）
+2. DASHSCOPE_COMPATIBLE_BASE_URL：默认 https://dashscope.aliyuncs.com/compatible-mode/v1
+3. DASHSCOPE_TEXT_MODEL：默认 qwen3.5-flash
+4. DASHSCOPE_VISION_MODEL：默认 qwen3-vl-flash
+5. DASHSCOPE_ENABLE_THINKING：默认 false
 6. MOCK_MODE：true 为本地兜底，false 为真实模型调用
 7. DATA_DIR：数据目录，默认 ./data
 
@@ -144,17 +144,17 @@ npm --prefix "d:\声影随行\frontend" run dev
 
 当前代码已兼容 utf-8-sig 读取。如果仍异常，可手工把 data 下 JSON 改为无 BOM UTF-8。
 
-### 3. Gemini 视觉失败，提示配额或限流
+### 3. DashScope 视觉失败，提示配额或限流
 
-常见报错：429 ResourceExhausted。
+常见报错：429 / ResourceExhausted。
 
-含义：免费层按模型有每日额度上限，且有短时速率限制。
+含义：模型配额不足或触发短时速率限制。
 
 建议：
 
 1. 稍后重试（等待 retry_delay）
-2. 在 AI Studio 检查套餐与配额
-3. 更换可用模型或启用付费计划
+2. 在 DashScope 控制台检查套餐与配额
+3. 确认模型开通（如 qwen3-vl-flash）或启用付费计划
 4. 必要时切回 MOCK_MODE=true 保障演示稳定
 
 ### 4. 背景图切换不符合预期

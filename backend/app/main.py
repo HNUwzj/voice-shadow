@@ -11,8 +11,8 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.models import ChatRequest, ChatResponse, DailyReportResponse, PraiseResponse
 from app.services.analysis import analyze_psych_signal
+from app.services.dashscope_client import DashscopeClient
 from app.services.json_store import JsonStore
-from app.services.minimax_client import MinimaxClient
 from app.services.reporting import build_daily_report
 
 app = FastAPI(title="双向陪伴助手", version="0.1.0")
@@ -26,7 +26,7 @@ app.add_middleware(
 )
 
 store = JsonStore(settings.data_dir)
-client = MinimaxClient()
+client = DashscopeClient()
 upload_dir = Path(settings.data_dir) / "uploads"
 upload_dir.mkdir(parents=True, exist_ok=True)
 

@@ -5,7 +5,7 @@ import re
 from typing import Any
 
 from app.models import PsychSignal
-from app.services.minimax_client import MinimaxClient
+from app.services.dashscope_client import DashscopeClient
 
 
 ANALYSIS_PROMPT = """
@@ -78,7 +78,7 @@ def _pattern_hits(text: str, patterns: list[str], prefix: str) -> list[str]:
     return hits
 
 
-async def analyze_psych_signal(client: MinimaxClient, text: str) -> PsychSignal:
+async def analyze_psych_signal(client: DashscopeClient, text: str) -> PsychSignal:
     messages = [
         {"role": "system", "content": ANALYSIS_PROMPT},
         {"role": "user", "content": text},
