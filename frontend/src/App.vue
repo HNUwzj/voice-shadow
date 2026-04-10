@@ -1,12 +1,24 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { fetchDailyReport, resetHistory, sendChat, uploadImage } from './api'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import {
+  deleteVoice,
+  enrollVoice,
+  fetchTodayConversations,
+  fetchDailyReport,
+  fetchVoices,
+  resetHistory,
+  sendChat,
+  uploadImage,
+  type ConversationItem,
+  type VoiceItem
+} from './api'
 
 type Msg = {
   role: 'user' | 'assistant'
   type: 'text' | 'image'
   text?: string
   imageUrl?: string
+  audioUrl?: string
 }
 
 const childId = ref('default-child')
@@ -22,6 +34,94 @@ const sceneUrl = ref('')
 const sceneFallback = ref('radial-gradient(circle at 20% 10%, #264b7a 0%, #1f2f4e 36%, #4a2f26 100%)')
 const report = ref<any>(null)
 const selectedFile = ref<File | null>(null)
+const voiceFile = ref<File | null>(null)
+const voicePrefix = ref('')
+const voiceId = ref('')
+const currentVoiceName = ref('')
+const voiceModalOpen = ref(false)
+const registeredVoices = ref<VoiceItem[]>([])
+const deletingVoiceId = ref('')
+const messagesRef = ref<HTMLElement | null>(null)
+
+function scrollMessagesToBottom(behavior: ScrollBehavior = 'smooth') {
+  const el = messagesRef.value
+  if (!el) return
+  el.scrollTo({ top: el.scrollHeight, behavior })
+}
+
+async function syncCurrentVoice() {
+  try {
+    const data = await fetchVoices(childId.value)
+    registeredVoices.value = data.items
+    voiceId.value = data.items[0]?.voice_id ?? ''
+    currentVoiceName.value = data.items[0]?.display_name ?? ''
+  } catch {
+    voiceId.value = ''
+    currentVoiceName.value = ''
+  }
+}
+
+onMounted(() => {
+  void initializePageState()
+})
+
+function toAssetUrl(relativeUrl?: string | null): string | undefined {
+  if (!relativeUrl) return undefined
+  const base = 'http://127.0.0.1:8001'
+  return `${base}${relativeUrl}${relativeUrl.includes('?') ? '&' : '?'}v=${Date.now()}`
+}
+
+function toAudioUrl(relativeUrl?: string | null): string | undefined {
+  return toAssetUrl(relativeUrl)
+}
+
+function mapConversationItemToMsg(item: ConversationItem): Msg | null {
+  const role = item.role === 'assistant' ? 'assistant' : 'user'
+  const messageType = item.message_type === 'image' ? 'image' : 'text'
+
+  if (messageType === 'image') {
+    return {
+      role,
+      type: 'image',
+      text: item.content || '',
+      imageUrl: toAssetUrl(item.image_url)
+    }
+  }
+
+  return {
+    role,
+    type: 'text',
+    text: item.content || '',
+    audioUrl: role === 'assistant' ? toAudioUrl(item.audio_url) : undefined
+  }
+}
+
+async function loadTodayMessages() {
+  try {
+    const data = await fetchTodayConversations(childId.value)
+    const mapped = data.items
+      .map((item) => mapConversationItemToMsg(item))
+      .filter((item): item is Msg => item !== null)
+
+    messages.value = mapped.length > 0 ? mapped : [defaultMessage]
+  } catch {
+    messages.value = [defaultMessage]
+  }
+}
+
+async function initializePageState() {
+  await Promise.all([syncCurrentVoice(), loadTodayMessages()])
+  await nextTick()
+  scrollMessagesToBottom('auto')
+}
+
+watch(
+  () => messages.value.length,
+  async () => {
+    await nextTick()
+    scrollMessagesToBottom('smooth')
+  }
+)
 
 const sceneStyle = computed(() => {
   const overlay = 'linear-gradient(130deg, rgba(7,25,44,.26), rgba(12,60,54,.22), rgba(96,44,22,.18))'
@@ -84,7 +184,12 @@ async function onSend() {
       enable_scene: true,
       enable_psych_analysis: true
     })
-    messages.value.push({ role: 'assistant', type: 'text', text: data.reply })
+    messages.value.push({
+      role: 'assistant',
+      type: 'text',
+      text: data.reply,
+      audioUrl: toAudioUrl(data.assistant_audio_url)
+    })
     if (data.scene_image_url) {
       await applyScene(data.scene_image_url, text)
     }
@@ -98,6 +203,11 @@ async function onSend() {
 function onPickFile(e: Event) {
   const target = e.target as HTMLInputElement
   selectedFile.value = target.files?.[0] ?? null
+}
+
+function onPickVoiceFile(e: Event) {
+  const target = e.target as HTMLInputElement
+  voiceFile.value = target.files?.[0] ?? null
 }
 
 async function onUploadPraise() {
@@ -118,7 +228,12 @@ async function onUploadPraise() {
 
   try {
     const data = await uploadImage(childId.value, caption, selectedFile.value)
-    messages.value.push({ role: 'assistant', type: 'text', text: data.reply })
+    messages.value.push({
+      role: 'assistant',
+      type: 'text',
+      text: data.reply,
+      audioUrl: toAudioUrl(data.assistant_audio_url)
+    })
     if (data.scene_image_url && extractSeenObject(caption)) {
       await applyScene(data.scene_image_url, caption)
     }
@@ -139,6 +254,23 @@ async function onLoadReport() {
   }
 }
 
+async function onEnrollVoice() {
+  if (!voiceFile.value || loading.value) return
+  loading.value = true
+  try {
+    const data = await enrollVoice(childId.value, voiceFile.value, voicePrefix.value)
+    voiceId.value = data.voice_id
+    await syncCurrentVoice()
+    messages.value.push({ role: 'assistant', type: 'text', text: `声纹注册完成，voice_id: ${data.voice_id}` })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : '声纹注册失败，请确认样本可用并重试。'
+    messages.value.push({ role: 'assistant', type: 'text', text: msg })
+  } finally {
+    loading.value = false
+    voiceFile.value = null
+  }
+}
+
 async function onResetHistory() {
   if (loading.value) return
   if (!window.confirm('确认清空全部历史记录并重置日报吗？')) return
@@ -156,6 +288,47 @@ async function onResetHistory() {
     loading.value = false
   }
 }
+
+async function openVoiceManager() {
+  if (loading.value) return
+  loading.value = true
+  try {
+    await syncCurrentVoice()
+    voiceModalOpen.value = true
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : '获取人声列表失败'
+    messages.value.push({ role: 'assistant', type: 'text', text: msg })
+  } finally {
+    loading.value = false
+  }
+}
+
+function closeVoiceManager() {
+  if (deletingVoiceId.value) return
+  voiceModalOpen.value = false
+}
+
+async function onDeleteVoice(voice: VoiceItem) {
+  if (deletingVoiceId.value) return
+  const confirmText = `确认删除该人声吗？\n${voice.voice_id}`
+  if (!window.confirm(confirmText)) return
+
+  deletingVoiceId.value = voice.voice_id
+  try {
+    await deleteVoice(childId.value, voice.voice_id)
+    registeredVoices.value = registeredVoices.value.filter((item) => item.voice_id !== voice.voice_id)
+    if (voiceId.value === voice.voice_id) {
+      voiceId.value = registeredVoices.value[0]?.voice_id ?? ''
+      currentVoiceName.value = registeredVoices.value[0]?.display_name ?? ''
+    }
+    messages.value.push({ role: 'assistant', type: 'text', text: `已删除人声：${voice.voice_id}` })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : '删除人声失败'
+    messages.value.push({ role: 'assistant', type: 'text', text: msg })
+  } finally {
+    deletingVoiceId.value = ''
+  }
+}
 </script>
 
 <template>
@@ -166,14 +339,15 @@ async function onResetHistory() {
 
     <main class="layout">
       <section class="chat-card glass">
-        <div class="messages">
+        <div ref="messagesRef" class="messages">
           <article v-for="(m, idx) in messages" :key="idx" class="bubble" :class="m.role">
             <template v-if="m.type === 'image'">
               <img v-if="m.imageUrl" :src="m.imageUrl" alt="上传的图片" class="bubble-image" />
               <p v-if="m.text" class="bubble-caption">{{ m.text }}</p>
             </template>
             <template v-else>
-              {{ m.text }}
+              <p>{{ m.text }}</p>
+              <audio v-if="m.audioUrl" :src="m.audioUrl" controls autoplay preload="none"></audio>
             </template>
           </article>
         </div>
@@ -191,6 +365,17 @@ async function onResetHistory() {
 
         <div class="chat-footer-actions">
           <button class="danger" @click="onResetHistory" :disabled="loading">删除历史记录</button>
+        </div>
+
+        <div class="uploader voice-panel">
+          <input v-model="voicePrefix" placeholder="给声音取个名字（例如：妈妈、爸爸）" />
+          <input type="file" accept="audio/*" @change="onPickVoiceFile" />
+          <div class="voice-actions">
+            <button @click="onEnrollVoice" :disabled="loading || !voiceFile">上传人声并注册</button>
+            <button class="secondary" @click="openVoiceManager" :disabled="loading">管理已注册人声</button>
+          </div>
+
+          <input v-model="currentVoiceName" placeholder="当前音色名" readonly />
         </div>
       </section>
 
@@ -212,5 +397,34 @@ async function onResetHistory() {
         </div>
       </aside>
     </main>
+
+    <div v-if="voiceModalOpen" class="voice-modal-mask" @click.self="closeVoiceManager">
+      <section class="voice-modal glass" role="dialog" aria-modal="true" aria-label="已注册人声列表">
+        <header class="voice-modal-header">
+          <h3>已注册人声</h3>
+          <button class="secondary" @click="closeVoiceManager" :disabled="!!deletingVoiceId">关闭</button>
+        </header>
+
+        <div v-if="registeredVoices.length === 0" class="voice-empty">当前没有可删除的人声。</div>
+
+        <ul v-else class="voice-list">
+          <li v-for="voice in registeredVoices" :key="voice.voice_id" class="voice-item">
+            <div class="voice-meta">
+              <p class="voice-id">{{ voice.display_name }}</p>
+              <p class="voice-sub">ID：{{ voice.voice_id }}</p>
+              <p class="voice-sub">前缀：{{ voice.prefix || '无' }} · 状态：{{ voice.status || '未知' }}</p>
+              <p class="voice-sub">时间：{{ voice.timestamp || '-' }}</p>
+            </div>
+            <button
+              class="danger"
+              @click="onDeleteVoice(voice)"
+              :disabled="deletingVoiceId === voice.voice_id"
+            >
+              {{ deletingVoiceId === voice.voice_id ? '删除中...' : '删除' }}
+            </button>
+          </li>
+        </ul>
+      </section>
+    </div>
   </div>
 </template>

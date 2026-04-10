@@ -23,6 +23,7 @@ class PsychSignal(BaseModel):
 class ChatResponse(BaseModel):
     reply: str
     scene_image_url: str | None = None
+    assistant_audio_url: str | None = None
     timestamp: datetime
 
 
@@ -30,6 +31,7 @@ class PraiseResponse(BaseModel):
     reply: str
     image_url: str | None = None
     scene_image_url: str | None = None
+    assistant_audio_url: str | None = None
     details: dict
 
 
@@ -40,3 +42,59 @@ class DailyReportResponse(BaseModel):
     risk_summary: dict
     suggestion: str
     highlights: list[str]
+
+
+class VoiceEnrollResponse(BaseModel):
+    voice_id: str
+    status: str
+    sample_audio_url: str
+    request_id: str | None = None
+
+
+class VoiceSynthesizeRequest(BaseModel):
+    child_id: str = Field(default="default-child")
+    text: str
+    voice_id: str | None = None
+
+
+class VoiceSynthesizeResponse(BaseModel):
+    voice_id: str
+    audio_url: str
+    request_id: str | None = None
+
+
+class VoiceItem(BaseModel):
+    child_id: str
+    voice_id: str
+    status: str = ""
+    display_name: str
+    prefix: str | None = None
+    sample_audio_url: str | None = None
+    timestamp: str = ""
+
+
+class VoiceListResponse(BaseModel):
+    child_id: str
+    items: list[VoiceItem]
+
+
+class VoiceDeleteResponse(BaseModel):
+    ok: bool
+    child_id: str
+    voice_id: str
+
+
+class ConversationItem(BaseModel):
+    child_id: str
+    role: str
+    content: str = ""
+    message_type: str = "text"
+    image_url: str | None = None
+    audio_url: str | None = None
+    timestamp: str = ""
+
+
+class ConversationListResponse(BaseModel):
+    child_id: str
+    day: str
+    items: list[ConversationItem]

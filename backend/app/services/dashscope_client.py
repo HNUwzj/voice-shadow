@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import mimetypes
 import os
 import random
@@ -20,12 +21,17 @@ try:
     import dashscope
     from dashscope.aigc.image_generation import ImageGeneration
     from dashscope.api_entities.dashscope_response import Message
+    from dashscope.audio.tts_v2 import SpeechSynthesizer, VoiceEnrollmentService
 except Exception:  # pragma: no cover - optional dependency
     dashscope = None
     ImageGeneration = None
     Message = None
+    SpeechSynthesizer = None
+    VoiceEnrollmentService = None
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _extract_dashscope_image_url(rsp: Any) -> str | None:
@@ -450,6 +456,113 @@ class DashscopeClient:
             f"https://image.pollinations.ai/prompt/{quote(prompt)}"
             f"?width=1600&height=900&nologo=true&seed={seed}&model=flux"
         )
+
+    async def enroll_custom_voice(self, audio_url: str, prefix: str | None = None) -> tuple[str, str, str | None]:
+        if not settings.dashscope_api_key:
+            raise RuntimeError("未配置 DASHSCOPE_API_KEY。")
+        if dashscope is None or VoiceEnrollmentService is None:
+            raise RuntimeError("缺少 dashscope 依赖，无法启用语音克隆。")
+
+        dashscope.base_websocket_api_url = settings.dashscope_base_websocket_api_url
+        dashscope.base_http_api_url = settings.dashscope_base_http_api_url
+        dashscope.api_key = settings.dashscope_api_key
+
+        service = VoiceEnrollmentService()
+        voice_id = await asyncio.to_thread(
+            service.create_voice,
+            target_model=settings.dashscope_tts_model,
+            prefix=(prefix or settings.dashscope_voice_prefix),
+            url=audio_url,
+        )
+
+        request_id = None
+        try:
+            request_id = service.get_last_request_id()
+        except Exception:
+            request_id = None
+
+        attempts = max(1, settings.dashscope_voice_poll_attempts)
+        interval = max(1, settings.dashscope_voice_poll_interval)
+        for _ in range(attempts):
+            info = await asyncio.to_thread(service.query_voice, voice_id=voice_id)
+            status = str((info or {}).get("status", ""))
+            if status == "OK":
+                return voice_id, status, request_id
+            if status == "UNDEPLOYED":
+                raise RuntimeError("声纹训练失败（UNDEPLOYED），请更换清晰的人声样本重试。")
+            await asyncio.sleep(interval)
+
+        raise RuntimeError("声纹训练超时，请稍后重试。")
+
+    async def synthesize_with_voice(self, voice_id: str, text: str, output_path: Path) -> str | None:
+        if not settings.dashscope_api_key:
+            raise RuntimeError("未配置 DASHSCOPE_API_KEY。")
+        if dashscope is None or SpeechSynthesizer is None:
+            raise RuntimeError("缺少 dashscope 依赖，无法启用语音合成。")
+
+        dashscope.base_websocket_api_url = settings.dashscope_base_websocket_api_url
+        dashscope.base_http_api_url = settings.dashscope_base_http_api_url
+        dashscope.api_key = settings.dashscope_api_key
+
+        instruction = (settings.dashscope_tts_instruction or "").strip() or None
+        retries = max(1, settings.dashscope_tts_retry_attempts)
+        min_audio_bytes = max(1000, settings.dashscope_tts_min_audio_bytes)
+        last_error: str | None = None
+
+        for attempt in range(1, retries + 1):
+            try:
+                try:
+                    synthesizer = SpeechSynthesizer(
+                        model=settings.dashscope_tts_model,
+                        voice=voice_id,
+                        instruction=instruction,
+                        seed=settings.dashscope_tts_seed,
+                    )
+                except TypeError:
+                    synthesizer = SpeechSynthesizer(
+                        model=settings.dashscope_tts_model,
+                        voice=voice_id,
+                        instruction=instruction,
+                    )
+
+                audio_data = await asyncio.to_thread(synthesizer.call, text)
+                if not audio_data:
+                    raise RuntimeError("模型未返回音频数据")
+
+                audio_size = len(audio_data)
+                request_id = None
+                try:
+                    request_id = synthesizer.get_last_request_id()
+                except Exception:
+                    request_id = None
+
+                logger.info(
+                    "tts synth done: voice_id=%s request_id=%s bytes=%s attempt=%s",
+                    voice_id,
+                    request_id,
+                    audio_size,
+                    attempt,
+                )
+
+                if audio_size < min_audio_bytes:
+                    raise RuntimeError(f"音频过短({audio_size} bytes)，低于阈值 {min_audio_bytes}")
+
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_bytes(audio_data)
+                return request_id
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "tts synth failed: voice_id=%s attempt=%s/%s error=%s",
+                    voice_id,
+                    attempt,
+                    retries,
+                    last_error,
+                )
+                if attempt < retries:
+                    await asyncio.sleep(0.35)
+
+        raise RuntimeError(f"语音合成失败：{last_error or '未知错误'}")
 
     def _mock_chat(self, messages: list[dict[str, str]]) -> str:
         last = messages[-1]["content"] if messages else ""

@@ -1,31 +1,33 @@
 # 声影随行
 
-一个面向亲子沟通场景的双向陪伴助手，包含聊天陪伴、心理风险侧写、图片夸夸和日报能力。
+面向亲子沟通场景的双向陪伴助手，支持聊天陪伴、图片夸夸、语音克隆朗读、心理信号分析和日报。
 
-当前版本技术栈：
+## 技术栈
 
 1. 后端：FastAPI
 2. 前端：Vue 3 + Vite
-3. 数据存储：本地 JSON 文件
+3. 存储：本地 JSON
+4. 大模型与语音：DashScope（Qwen + CosyVoice）
 
-## 核心能力
+## 当前能力
 
-1. 亲子风格聊天
-2. 心理信号识别（自卑、被欺凌、孤独、陪伴需求）
-3. 图片上传夸夸（多模态）
-4. 每日心理日报汇总
-5. 一键删除历史记录并重置日报
-6. 背景图仅在识别到“看到/看见/遇到”等场景描述时切换
+1. 亲子口吻聊天（自动保存会话）
+2. 图片上传后生成夸夸回复
+3. 心理信号分析与日报统计
+4. 声纹注册、语音列表、语音删除
+5. 助手回复自动朗读（返回音频 URL，前端自动播放）
+6. 当天会话恢复（刷新不丢当天历史）
+7. 一键清空历史与日报
 
 ## 项目结构
 
 1. backend：后端服务
 2. frontend：前端页面
-3. backend/data：本地数据目录
+3. .gitignore：版本控制忽略规则
 4. backend/data/conversations.json：对话记录
-5. backend/data/analyses.json：心理分析记录
-6. backend/data/reports.json：日报缓存记录
-7. backend/data/uploads：上传图片
+5. backend/data/analyses.json：分析记录
+6. backend/data/reports.json：日报缓存
+7. backend/data/uploads：上传文件与生成音频
 
 ## 环境要求
 
@@ -33,140 +35,129 @@
 2. Node.js 18+
 3. npm 9+
 
-## 快速启动（Windows）
+## 首次安装（Windows）
 
-### 1. 启动后端
+### 1. 后端依赖
 
 ```powershell
 Set-Location "d:\声影随行\backend"
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-copy .env.example .env
+Copy-Item .env.example .env
 ```
 
-可选依赖（启用 DashScope 文生图时建议安装）：
-
-```powershell
-pip install dashscope
-```
-
-启动服务（当前项目默认使用 8001 端口）：
-
-```powershell
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 --app-dir "d:\声影随行\backend"
-```
-
-### 2. 启动前端
+### 2. 前端依赖
 
 ```powershell
 Set-Location "d:\声影随行\frontend"
 npm install
-npm run dev
 ```
 
-访问地址：
+## 日常启动步骤（完整）
 
-1. 前端：http://127.0.0.1:5173
+### 1. 启动后端（端口 8001）
+
+```powershell
+Set-Location "d:\声影随行\backend"
+.\.venv\Scripts\Activate.ps1
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 --app-dir "d:\声影随行\backend"
+```
+
+### 2. 启动前端（优先 5173）
+
+```powershell
+Set-Location "d:\声影随行\frontend"
+npm run dev -- --host 0.0.0.0 --port 5173
+```
+
+说明：如果 5173 被占用，Vite 会自动切到 5174 或更高端口，请以终端输出为准。
+
+### 3. 访问地址
+
+1. 前端：http://127.0.0.1:5173（或终端显示的实际端口）
 2. 后端文档：http://127.0.0.1:8001/docs
 3. 健康检查：http://127.0.0.1:8001/health
 
-## 环境变量说明
+## 声音克隆流程（无公网环境）
 
-配置文件路径：backend/.env
+1. 打开前端并进入人声注册区域。
+2. 输入人声名称，上传音频样本（建议 10 秒以上，单人清晰录音）。
+3. 点击注册后，后端会自动：
+	- 拉起 cpolar 内网穿透
+	- 获取公网 URL
+	- 将样本 URL 提交到 DashScope 完成声纹注册
+4. 注册成功后，会在“已注册人声列表”看到新 voice。
 
-常用项：
+说明：若 cpolar 旧会话占满，后端会自动清理旧 cpolar 进程后重试。
 
-1. DASHSCOPE_API_KEY：阿里云 DashScope Key（用于文本、视觉理解与场景图）
-2. DASHSCOPE_COMPATIBLE_BASE_URL：默认 https://dashscope.aliyuncs.com/compatible-mode/v1
-3. DASHSCOPE_TEXT_MODEL：默认 qwen3.5-flash
-4. DASHSCOPE_VISION_MODEL：默认 qwen3-vl-flash
-5. DASHSCOPE_ENABLE_THINKING：默认 false
-6. MOCK_MODE：true 为本地兜底，false 为真实模型调用
-7. DATA_DIR：数据目录，默认 ./data
+## 服务停止
+
+1. 在运行 uvicorn 的终端按 Ctrl+C
+2. 在运行 Vite 的终端按 Ctrl+C
+
+如果忘记在哪个终端启动，可用以下命令强制释放端口：
+
+```powershell
+$p = Get-NetTCPConnection -LocalPort 8001 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess
+if ($p) { Stop-Process -Id $p -Force }
+
+$p2 = Get-NetTCPConnection -LocalPort 5173 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess
+if ($p2) { Stop-Process -Id $p2 -Force }
+
+$p3 = Get-NetTCPConnection -LocalPort 5174 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess
+if ($p3) { Stop-Process -Id $p3 -Force }
+```
+
+## 删除历史行为
+
+前端点击“删除历史记录”会调用 `POST /api/history/reset`，并执行：
+
+1. 清空 `conversations`、`analyses`、`reports`
+2. 清空 `backend/data/uploads` 目录内容（保留目录本身）
+
+## 环境变量（backend/.env）
+
+核心项如下：
+
+1. DASHSCOPE_API_KEY：DashScope API Key
+2. DASHSCOPE_TEXT_MODEL：默认 qwen3.5-flash
+3. DASHSCOPE_VISION_MODEL：默认 qwen3-vl-flash
+4. DASHSCOPE_TTS_MODEL：默认 cosyvoice-v3.5-flash
+5. DASHSCOPE_TTS_INSTRUCTION：朗读风格指令
+6. DASHSCOPE_TTS_SEED：语音稳定随机种子
+7. DASHSCOPE_TTS_RETRY_ATTEMPTS：语音失败重试次数
+8. DASHSCOPE_TTS_MIN_AUDIO_BYTES：最小音频体积阈值
+9. DASHSCOPE_VOICE_PREFIX：声纹 ID 前缀
+10. PUBLIC_ASSET_BASE_URL：部署公网地址（已配置时优先使用）
+11. CPOLAR_AUTO_TUNNEL：未配置 PUBLIC_ASSET_BASE_URL 时是否自动拉起 cpolar（默认 true）
+12. CPOLAR_KILL_EXISTING：启动新隧道前是否自动清理旧 cpolar 进程（默认 true）
+13. CPOLAR_PATH：cpolar 可执行文件路径
+14. CPOLAR_START_TIMEOUT_SEC：等待 cpolar 返回公网地址的超时时间（秒）
+15. MOCK_MODE：false 为真实调用，true 为本地兜底
+16. DATA_DIR：数据目录，默认 ./data
 
 ## API 概览
 
-### 1. 聊天
+1. POST /api/chat：聊天回复（可选心理分析/场景图）
+2. POST /api/praise-image：图片夸夸
+3. GET /api/report/daily：每日心理日报
+4. POST /api/voice/enroll：注册声纹
+5. GET /api/voice/list：获取已注册人声列表
+6. DELETE /api/voice/{voice_id}：删除指定人声
+7. POST /api/voice/synthesize：文本转语音
+8. GET /api/conversations/today：获取当天会话
+9. POST /api/history/reset：清空历史数据
 
-1. 路径：POST /api/chat
-2. 用途：聊天回复 + 可选心理分析 + 可选场景图
+## 常见问题
 
-请求示例：
-
-```json
-{
-	"child_id": "default-child",
-	"message": "今天我看见一只小狗",
-	"enable_scene": true,
-	"enable_psych_analysis": true
-}
-```
-
-### 2. 图片夸夸
-
-1. 路径：POST /api/praise-image
-2. 用途：上传图片并生成夸夸文案
-
-### 3. 日报
-
-1. 路径：GET /api/report/daily?child_id=default-child
-2. 用途：返回当天消息数、心理指标均值与建议
-
-### 4. 重置历史
-
-1. 路径：POST /api/history/reset
-2. 用途：清空 conversations、analyses、reports
-
-## 数据与重置说明
-
-点击前端“删除历史记录”后会：
-
-1. 调用 /api/history/reset
-2. 清空后端 JSON 数据
-3. 聊天与日报展示回到初始状态
-
-## 常见问题排查
-
-### 1. 前端无法启动，提示找不到 package.json
-
-原因：在项目根目录执行了 npm run dev。
-
-解决：
-
-```powershell
-npm --prefix "d:\声影随行\frontend" run dev
-```
-
-### 2. 后端 500，提示 Unexpected UTF-8 BOM
-
-原因：JSON 文件编码包含 BOM。
-
-当前代码已兼容 utf-8-sig 读取。如果仍异常，可手工把 data 下 JSON 改为无 BOM UTF-8。
-
-### 3. DashScope 视觉失败，提示配额或限流
-
-常见报错：429 / ResourceExhausted。
-
-含义：模型配额不足或触发短时速率限制。
-
-建议：
-
-1. 稍后重试（等待 retry_delay）
-2. 在 DashScope 控制台检查套餐与配额
-3. 确认模型开通（如 qwen3-vl-flash）或启用付费计划
-4. 必要时切回 MOCK_MODE=true 保障演示稳定
-
-### 4. 背景图切换不符合预期
-
-当前逻辑：仅在输入中识别到“看到/看见/见到/遇到/发现”等场景描述时切换。
+1. 后端无法启动：先检查 8001 是否被占用，再重启。
+2. 前端端口变化：5173 被占用时自动切 5174，属正常行为。
+3. 声纹注册失败：通常是 cpolar 未启动成功、样本 URL 无法公网访问，或音频质量不足。
+4. 视觉或语音偶发失败：优先检查 DashScope 配额、限流和模型开通状态。
+5. 若报错包含 `ERR_CPOLAR_108`：表示 cpolar 会话超限，重试一次即可（后端会自动清理旧会话）。
 
 ## 安全建议
 
-1. 不要把真实 API Key 提交到仓库
-2. 如果 Key 在日志或截图中泄漏，请立即在平台旋转（重置）
-3. 建议把 .env 加入版本控制忽略
-
-## 版本备注
-
-当前 README 对齐了本地实现与运行端口（8001 + 5173），如后续改动接口或模型配置，请同步更新本文档。
+1. 不要提交真实 .env 到仓库
+2. API Key 泄漏后立即在平台旋转

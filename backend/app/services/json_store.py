@@ -16,6 +16,7 @@ class JsonStore:
             "conversations": self.base / "conversations.json",
             "analyses": self.base / "analyses.json",
             "reports": self.base / "reports.json",
+            "voices": self.base / "voices.json",
         }
         for file in self.files.values():
             if not file.exists():
@@ -52,6 +53,33 @@ class JsonStore:
 
     def clear(self, key: str) -> None:
         self._write(key, [])
+
+    def latest_voice(self, child_id: str) -> dict[str, Any] | None:
+        data = self._read("voices")
+        rows = [row for row in data if row.get("child_id") == child_id]
+        return rows[-1] if rows else None
+
+    def list_voices(self, child_id: str) -> list[dict[str, Any]]:
+        data = self._read("voices")
+        rows = [row for row in data if row.get("child_id") == child_id]
+        rows.sort(key=lambda row: row.get("timestamp", ""), reverse=True)
+        return rows
+
+    def delete_voice(self, child_id: str, voice_id: str) -> bool:
+        data = self._read("voices")
+        next_data: list[dict[str, Any]] = []
+        deleted = False
+        for row in data:
+            same_child = row.get("child_id") == child_id
+            same_voice = str(row.get("voice_id", "")).strip() == voice_id
+            if same_child and same_voice:
+                deleted = True
+                continue
+            next_data.append(row)
+
+        if deleted:
+            self._write("voices", next_data)
+        return deleted
 
     @staticmethod
     def now_iso() -> str:

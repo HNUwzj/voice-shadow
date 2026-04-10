@@ -3,10 +3,18 @@ from __future__ import annotations
 from statistics import mean
 
 
+def _count_user_messages(conversations: list[dict]) -> int:
+    user_count = sum(1 for row in conversations if str(row.get("role", "")).lower() == "user")
+    # Backward-compatible fallback for legacy rows missing role.
+    return user_count if user_count > 0 else len(conversations)
+
+
 def build_daily_report(analyses: list[dict], conversations: list[dict]) -> dict:
+    total_messages = _count_user_messages(conversations)
+
     if not analyses:
         return {
-            "total_messages": len(conversations),
+            "total_messages": total_messages,
             "risk_summary": {
                 "self_esteem_risk_avg": 0,
                 "bullying_risk_avg": 0,
@@ -43,7 +51,7 @@ def build_daily_report(analyses: list[dict], conversations: list[dict]) -> dict:
         suggestion = "建议增加高频短通话，并约定每周一次共同活动目标。"
 
     return {
-        "total_messages": len(conversations),
+        "total_messages": total_messages,
         "risk_summary": {
             "self_esteem_risk_avg": round(self_esteem_avg, 3),
             "bullying_risk_avg": round(bullying_avg, 3),
