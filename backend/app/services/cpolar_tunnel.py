@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import atexit
+import json
 import os
+import queue
 import re
 import subprocess
 import threading
 import time
 from pathlib import Path
+from urllib.request import urlopen
 
 from app.config import settings
 
@@ -32,6 +35,12 @@ class CpolarTunnelManager:
 			if self._public_base_url:
 				return self._public_base_url
 
+			if not force_restart:
+				api_url = self._read_api_forwarding_url(local_port)
+				if api_url:
+					self._public_base_url = api_url.rstrip("/")
+					return self._public_base_url
+
 			if self._proc is not None and self._proc.poll() is not None:
 				self._proc = None
 
@@ -42,6 +51,30 @@ class CpolarTunnelManager:
 			self._public_base_url = public_url.rstrip("/")
 			return self._public_base_url
 
+	def _read_api_forwarding_url(self, local_port: int) -> str | None:
+		try:
+			with urlopen("http://127.0.0.1:4040/api/tunnels", timeout=3) as resp:
+				payload = json.loads(resp.read().decode("utf-8", errors="ignore") or "{}")
+		except Exception:
+			return None
+
+		candidates: list[str] = []
+		for tunnel in payload.get("tunnels", []) if isinstance(payload, dict) else []:
+			if not isinstance(tunnel, dict):
+				continue
+			config = tunnel.get("config") if isinstance(tunnel.get("config"), dict) else {}
+			addr = str(config.get("addr", ""))
+			if f":{local_port}" not in addr and str(local_port) not in addr:
+				continue
+			public_url = str(tunnel.get("public_url", "")).strip()
+			if public_url:
+				candidates.append(public_url)
+
+		for url in candidates:
+			if url.startswith("https://"):
+				return url
+		return candidates[0] if candidates else None
+
 	def _start_cpolar(self, local_port: int) -> subprocess.Popen[str]:
 		cpolar_exe = settings.cpolar_path.strip() or "cpolar"
 		if cpolar_exe != "cpolar" and not Path(cpolar_exe).exists():
@@ -51,6 +84,9 @@ class CpolarTunnelManager:
 			self._kill_existing_cpolar()
 
 		try:
+			env = os.environ.copy()
+			for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]:
+				env.pop(key, None)
 			return subprocess.Popen(
 				[cpolar_exe, "http", str(local_port), "-log", "stdout", "-log-level", "INFO"],
 				stdout=subprocess.PIPE,
@@ -58,6 +94,7 @@ class CpolarTunnelManager:
 				text=True,
 				encoding="utf-8",
 				errors="ignore",
+				env=env,
 			)
 		except Exception as exc:  # pragma: no cover - environment dependent
 			raise RuntimeError(f"启动 cpolar 失败：{exc}") from exc
@@ -82,14 +119,28 @@ class CpolarTunnelManager:
 
 		deadline = time.time() + max(3, timeout_sec)
 		last_lines: list[str] = []
+		lines: queue.Queue[str] = queue.Queue()
+
+		def read_stdout() -> None:
+			try:
+				for line in proc.stdout:
+					lines.put(line)
+			except Exception:
+				return
+
+		threading.Thread(target=read_stdout, daemon=True).start()
 
 		while time.time() < deadline:
 			if proc.poll() is not None:
 				break
 
-			line = proc.stdout.readline()
-			if not line:
-				time.sleep(0.1)
+			api_url = self._read_api_forwarding_url(local_port)
+			if api_url:
+				return api_url
+
+			try:
+				line = lines.get(timeout=0.2)
+			except queue.Empty:
 				continue
 
 			text = line.strip()

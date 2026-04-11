@@ -3,6 +3,7 @@ export type ChatPayload = {
   message: string
   enable_scene: boolean
   enable_psych_analysis: boolean
+  voice_id?: string | null
 }
 
 export type PraiseImageResponse = {
@@ -18,6 +19,14 @@ export type ChatResponse = {
   scene_image_url?: string | null
   assistant_audio_url?: string | null
   timestamp: string
+}
+
+export type ParentStyleResponse = {
+  child_id: string
+  use_default: boolean
+  custom_rules: string
+  default_rules: string
+  active_rules: string
 }
 
 export type VoiceEnrollResponse = {
@@ -64,6 +73,20 @@ export type ConversationListResponse = {
   items: ConversationItem[]
 }
 
+export type MailboxItem = {
+  child_id: string
+  sender: string
+  content: string
+  message_type: 'text' | 'audio'
+  audio_url?: string | null
+  timestamp: string
+}
+
+export type MailboxListResponse = {
+  child_id: string
+  items: MailboxItem[]
+}
+
 const API_BASE = 'http://127.0.0.1:8001'
 
 async function readErrorMessage(res: Response, fallback: string): Promise<string> {
@@ -71,11 +94,9 @@ async function readErrorMessage(res: Response, fallback: string): Promise<string
     const data = await res.json()
     const detail = (data as { detail?: unknown })?.detail
     if (typeof detail === 'string' && detail.trim()) return detail
-    if (Array.isArray(detail) && detail.length) {
-      return String(detail[0])
-    }
+    if (Array.isArray(detail) && detail.length) return String(detail[0])
   } catch {
-    // Ignore parse failure and keep fallback.
+    // Keep fallback when the backend does not return JSON.
   }
   return fallback
 }
@@ -90,30 +111,98 @@ export async function sendChat(payload: ChatPayload): Promise<ChatResponse> {
   return res.json()
 }
 
+export async function fetchParentStyle(childId: string): Promise<ParentStyleResponse> {
+  const res = await fetch(`${API_BASE}/api/parent-style?child_id=${encodeURIComponent(childId)}`)
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取家长设定失败'))
+  return res.json()
+}
+
+export async function saveParentStyle(
+  childId: string,
+  useDefault: boolean,
+  customRules: string
+): Promise<ParentStyleResponse> {
+  const res = await fetch(`${API_BASE}/api/parent-style`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      child_id: childId,
+      use_default: useDefault,
+      custom_rules: customRules
+    })
+  })
+  if (!res.ok) throw new Error(await readErrorMessage(res, '保存家长设定失败'))
+  return res.json()
+}
+
 export async function fetchDailyReport(childId: string) {
   const res = await fetch(`${API_BASE}/api/report/daily?child_id=${encodeURIComponent(childId)}`)
   if (!res.ok) throw new Error(await readErrorMessage(res, '日报接口失败'))
   return res.json()
 }
 
-export async function uploadImage(childId: string, text: string, file: File): Promise<PraiseImageResponse> {
+export async function uploadImage(
+  childId: string,
+  text: string,
+  file: File,
+  voiceId?: string | null
+): Promise<PraiseImageResponse> {
   const formData = new FormData()
   formData.append('child_id', childId)
   formData.append('text', text)
+  if (voiceId) formData.append('voice_id', voiceId)
   formData.append('image', file)
 
   const res = await fetch(`${API_BASE}/api/praise-image`, {
     method: 'POST',
     body: formData
   })
-  if (!res.ok) throw new Error(await readErrorMessage(res, '图片夸夸接口失败'))
+  if (!res.ok) throw new Error(await readErrorMessage(res, '图片上传接口失败'))
+  return res.json()
+}
+
+export async function fetchMailbox(childId: string, viewer?: string): Promise<MailboxListResponse> {
+  const params = new URLSearchParams({ child_id: childId })
+  if (viewer) params.set('viewer', viewer)
+  const res = await fetch(`${API_BASE}/api/mailbox?${params.toString()}`)
+  if (!res.ok) throw new Error(await readErrorMessage(res, '获取留言失败'))
+  return res.json()
+}
+
+export async function clearMailbox(childId: string, viewer: string): Promise<void> {
+  const formData = new FormData()
+  formData.append('child_id', childId)
+  formData.append('viewer', viewer)
+
+  const res = await fetch(`${API_BASE}/api/mailbox/clear`, {
+    method: 'POST',
+    body: formData
+  })
+  if (!res.ok) throw new Error(await readErrorMessage(res, '清空留言失败'))
+}
+
+export async function sendMailboxItem(
+  childId: string,
+  sender: string,
+  text: string,
+  audio?: File | null
+): Promise<MailboxItem> {
+  const formData = new FormData()
+  formData.append('child_id', childId)
+  formData.append('sender', sender)
+  formData.append('text', text)
+  if (audio) formData.append('audio', audio)
+
+  const res = await fetch(`${API_BASE}/api/mailbox`, {
+    method: 'POST',
+    body: formData
+  })
+  if (!res.ok) throw new Error(await readErrorMessage(res, '发送留言失败'))
   return res.json()
 }
 
 export async function resetHistory() {
-  const res = await fetch(`${API_BASE}/api/history/reset`, {
-    method: 'POST'
-  })
+  const res = await fetch(`${API_BASE}/api/history/reset`, { method: 'POST' })
   if (!res.ok) throw new Error(await readErrorMessage(res, '清空历史接口失败'))
   return res.json()
 }
@@ -128,7 +217,7 @@ export async function enrollVoice(childId: string, file: File, prefix = ''): Pro
     method: 'POST',
     body: formData
   })
-  if (!res.ok) throw new Error(await readErrorMessage(res, '声纹注册失败'))
+  if (!res.ok) throw new Error(await readErrorMessage(res, '人声注册失败'))
   return res.json()
 }
 

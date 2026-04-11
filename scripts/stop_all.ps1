@@ -7,6 +7,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$frontendDir = Join-Path $repoRoot 'frontend'
+
 function Stop-PortListener([int]$Port, [string]$Name) {
     $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($listener) {
@@ -18,9 +21,30 @@ function Stop-PortListener([int]$Port, [string]$Name) {
     }
 }
 
+function Stop-RepoViteProcesses() {
+    $escapedFrontendDir = [regex]::Escape($frontendDir)
+    $processes = Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.CommandLine -and
+            $_.CommandLine -match 'vite' -and
+            $_.CommandLine -match $escapedFrontendDir
+        }
+
+    if (-not $processes) {
+        Write-Host 'No repo Vite process found' -ForegroundColor DarkGray
+        return
+    }
+
+    foreach ($proc in $processes) {
+        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+        Write-Host "Stopped frontend Vite PID $($proc.ProcessId)" -ForegroundColor Yellow
+    }
+}
+
 Stop-PortListener -Port $BackendPort -Name 'backend'
 Stop-PortListener -Port $FrontendPort -Name 'frontend'
 Stop-PortListener -Port $FrontendAltPort -Name 'frontend'
+Stop-RepoViteProcesses
 
 if ($StopCpolar.IsPresent) {
     $cpolarList = Get-Process cpolar -ErrorAction SilentlyContinue

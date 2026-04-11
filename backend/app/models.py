@@ -9,6 +9,7 @@ class ChatRequest(BaseModel):
     message: str
     enable_scene: bool = True
     enable_psych_analysis: bool = True
+    voice_id: str | None = None
 
 
 class PsychSignal(BaseModel):
@@ -25,6 +26,20 @@ class ChatResponse(BaseModel):
     scene_image_url: str | None = None
     assistant_audio_url: str | None = None
     timestamp: datetime
+
+
+class ParentStyleRequest(BaseModel):
+    child_id: str = Field(default="default-child")
+    use_default: bool = True
+    custom_rules: str = ""
+
+
+class ParentStyleResponse(BaseModel):
+    child_id: str
+    use_default: bool
+    custom_rules: str = ""
+    default_rules: str
+    active_rules: str
 
 
 class PraiseResponse(BaseModel):
@@ -82,6 +97,20 @@ class VoiceDeleteResponse(BaseModel):
     ok: bool
     child_id: str
     voice_id: str
+
+
+class MailboxItem(BaseModel):
+    child_id: str
+    sender: str
+    content: str = ""
+    message_type: str = "text"
+    audio_url: str | None = None
+    timestamp: str = ""
+
+
+class MailboxListResponse(BaseModel):
+    child_id: str
+    items: list[MailboxItem]
 
 
 class ConversationItem(BaseModel):

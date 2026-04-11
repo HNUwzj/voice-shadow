@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import logging
 import mimetypes
 import os
@@ -10,7 +11,9 @@ import re
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import urlparse
+
+import requests
 
 try:
     from openai import OpenAI
@@ -32,6 +35,14 @@ except Exception:  # pragma: no cover - optional dependency
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _build_dashscope_requests_session() -> requests.Session:
+    session = requests.Session()
+    if settings.dashscope_ignore_env_proxy:
+        # Some Windows environments inject HTTPS_PROXY and trigger SSLEOF for dashscope host.
+        session.trust_env = False
+    return session
 
 
 def _extract_dashscope_image_url(rsp: Any) -> str | None:
@@ -118,6 +129,8 @@ def _classify_dashscope_error(err: Exception) -> str:
 
     if any(k in low for k in ["connection refused", "failed to establish", "proxy", "10061", "127.0.0.1:7897"]):
         return "本地代理不可用，请确认代理已开启且端口为 127.0.0.1:7897。"
+    if any(k in low for k in ["ssleoferror", "unexpected eof while reading", "tlsv1 alert", "ssl"]):
+        return "TLS 握手异常（可能由代理或网络中断导致），建议先关闭系统代理后重试。"
     if any(k in low for k in ["timed out", "timeout", "deadline", "readtimeout", "connecttimeout"]):
         return "网络超时，请检查网络后重试。"
     if any(k in low for k in ["api key", "invalid", "permission denied", "unauthorized", "403", "401"]):
@@ -138,6 +151,73 @@ def _dashscope_action_hint() -> str:
         "2) 检查模型开通情况（例如 qwen3-vl-flash）；"
         "3) 检查账单、配额与限流配置。"
     )
+
+
+@contextmanager
+def _dashscope_proxy_guard():
+    if not settings.dashscope_ignore_env_proxy:
+        yield
+        return
+
+    keys = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy"]
+    prev = {k: os.environ.get(k) for k in keys}
+
+    # Voice enrollment/synthesis often fails with SSLEOF when process-level proxy is injected.
+    for k in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]:
+        os.environ.pop(k, None)
+
+    host = urlparse(settings.dashscope_base_http_api_url).hostname or "dashscope.aliyuncs.com"
+    no_proxy_items = ["127.0.0.1", "localhost", host]
+    old_no_proxy = prev.get("NO_PROXY") or prev.get("no_proxy")
+    if old_no_proxy:
+        no_proxy_items.append(old_no_proxy)
+    merged_no_proxy = ",".join(no_proxy_items)
+    os.environ["NO_PROXY"] = merged_no_proxy
+    os.environ["no_proxy"] = merged_no_proxy
+
+    try:
+        yield
+    finally:
+        for k, v in prev.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+@contextmanager
+def _dashscope_tts_proxy_env():
+    proxy = (settings.dashscope_tts_proxy_url or "").strip()
+    if not proxy:
+        yield
+        return
+
+    keys = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy"]
+    prev = {k: os.environ.get(k) for k in keys}
+
+    os.environ["HTTP_PROXY"] = proxy
+    os.environ["HTTPS_PROXY"] = proxy
+    os.environ["ALL_PROXY"] = proxy
+    os.environ["http_proxy"] = proxy
+    os.environ["https_proxy"] = proxy
+    os.environ["all_proxy"] = proxy
+
+    no_proxy_parts = ["127.0.0.1", "localhost"]
+    old_no_proxy = prev.get("NO_PROXY") or prev.get("no_proxy")
+    if old_no_proxy:
+        no_proxy_parts.append(old_no_proxy)
+    merged_no_proxy = ",".join(no_proxy_parts)
+    os.environ["NO_PROXY"] = merged_no_proxy
+    os.environ["no_proxy"] = merged_no_proxy
+
+    try:
+        yield
+    finally:
+        for k, v in prev.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 @contextmanager
@@ -328,13 +408,13 @@ def _scene_subject_spec(scene_prompt: str) -> tuple[str, str, str]:
 
     # Prioritize concrete visible objects to avoid generic landscape outputs.
     mapping = [
-        (["大黄狗", "黄狗", "dog", "puppy"], "a big yellow dog", "park lawn with warm sunlight", "golden, green, soft sky blue"),
+        (["两只狗", "两条狗", "狗", "小狗", "狗狗", "dog", "puppy"], "two playful dogs", "park lawn with warm sunlight", "golden, green, soft sky blue"),
         (["蝴蝶", "butterfly"], "a colorful butterfly", "flower field in spring", "orange, cyan, pink"),
-        (["大黄猫", "小猫", "猫", "cat", "kitten"], "a big yellow cat", "quiet neighborhood path", "honey yellow, mint green, cream"),
-        (["鸟", "bird"], "a small bird", "tree branch in a gentle park", "leaf green, sky blue, warm beige"),
-        (["兔", "rabbit", "bunny"], "a white rabbit", "meadow near wildflowers", "green, white, peach"),
-        (["鱼", "fish"], "a little fish", "clear stream with stones", "aqua, teal, silver"),
-        (["花", "flower"], "bright flowers", "garden path", "coral, yellow, leaf green"),
+        (["猫", "小猫", "cat", "kitten"], "a big yellow cat", "quiet neighborhood path", "honey yellow, mint green, cream"),
+        (["鸟", "小鸟", "bird"], "a small bird", "tree branch in a gentle park", "leaf green, sky blue, warm beige"),
+        (["兔", "兔子", "rabbit", "bunny"], "a white rabbit", "meadow near wildflowers", "green, white, peach"),
+        (["鱼", "小鱼", "fish"], "a little fish", "clear stream with stones", "aqua, teal, silver"),
+        (["花", "花朵", "flower"], "bright flowers", "garden path", "coral, yellow, leaf green"),
     ]
 
     for keys, subject, setting, palette in mapping:
@@ -342,6 +422,72 @@ def _scene_subject_spec(scene_prompt: str) -> tuple[str, str, str]:
             return subject, setting, palette
 
     return "a child-friendly outdoor scene", "cozy neighborhood at sunset", "warm orange, soft green, gentle blue"
+
+
+def _local_scene_image_url(scene_prompt: str, seed: int) -> str:
+    subject, setting, palette = _scene_subject_spec(scene_prompt)
+    uploads = Path(settings.data_dir) / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    output_path = uploads / f"scene_{seed}.svg"
+
+    escaped_subject = html.escape(subject)
+    escaped_setting = html.escape(setting)
+    escaped_palette = html.escape(palette)
+    if "dog" in subject:
+        subject_shape = """
+      <g transform="translate(840 520)">
+        <ellipse cx="-115" cy="35" rx="94" ry="54" fill="#d69a3a"/>
+        <circle cx="-190" cy="-8" r="58" fill="#e0ad4b"/>
+        <path d="M-226 -48 L-252 -96 L-204 -68 Z" fill="#9d5b2f"/>
+        <path d="M-166 -52 L-132 -96 L-128 -42 Z" fill="#9d5b2f"/>
+        <circle cx="-210" cy="-18" r="7" fill="#1e2a2f"/>
+        <circle cx="-174" cy="-18" r="7" fill="#1e2a2f"/>
+        <ellipse cx="-192" cy="2" rx="14" ry="10" fill="#39251e"/>
+        <path d="M-45 18 C10 -38 86 -40 130 10" fill="none" stroke="#d69a3a" stroke-width="18" stroke-linecap="round"/>
+        <ellipse cx="118" cy="38" rx="78" ry="44" fill="#f2c36c"/>
+        <circle cx="66" cy="4" r="44" fill="#f5cf7c"/>
+        <path d="M40 -32 L24 -72 L70 -48 Z" fill="#b26835"/>
+        <circle cx="54" cy="-4" r="6" fill="#1e2a2f"/>
+        <ellipse cx="75" cy="10" rx="12" ry="8" fill="#39251e"/>
+        <circle cx="-18" cy="80" r="42" fill="#f1f5ef"/>
+        <path d="M-44 76 C-18 58 12 58 38 76" fill="none" stroke="#2d6f89" stroke-width="9" stroke-linecap="round"/>
+      </g>
+"""
+    else:
+        subject_shape = """
+      <g transform="translate(840 520)">
+        <ellipse cx="0" cy="24" rx="150" ry="82" fill="#f1c56f"/>
+        <circle cx="-74" cy="-38" r="70" fill="#f4d07f"/>
+        <circle cx="-102" cy="-48" r="8" fill="#17232a"/>
+        <circle cx="-48" cy="-48" r="8" fill="#17232a"/>
+        <path d="M-72 -24 C-88 4 -55 4 -72 -24" fill="#6d3d31"/>
+        <path d="M104 4 C162 -58 220 -18 222 42" fill="none" stroke="#f1c56f" stroke-width="20" stroke-linecap="round"/>
+      </g>
+"""
+
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#bfe8df"/>
+      <stop offset="0.52" stop-color="#f7dca2"/>
+      <stop offset="1" stop-color="#e7a4a0"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="22%" cy="18%" r="38%">
+      <stop offset="0" stop-color="#fff2bd" stop-opacity=".95"/>
+      <stop offset="1" stop-color="#fff2bd" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#sky)"/>
+  <rect width="1600" height="900" fill="url(#sun)"/>
+  <path d="M0 642 C260 572 420 682 670 604 C910 530 1120 590 1600 510 L1600 900 L0 900 Z" fill="#78b978"/>
+  <path d="M0 730 C300 650 545 752 790 690 C1060 620 1260 700 1600 646 L1600 900 L0 900 Z" fill="#4f9d71"/>
+  <path d="M160 745 C420 690 650 710 900 665 C1080 635 1260 630 1440 654" fill="none" stroke="#eef4d9" stroke-width="18" stroke-linecap="round" opacity=".72"/>
+{subject_shape}
+  <metadata>subject={escaped_subject}; setting={escaped_setting}; palette={escaped_palette}</metadata>
+</svg>
+"""
+    output_path.write_text(svg, encoding="utf-8")
+    return f"/uploads/{output_path.name}"
 
 
 class DashscopeClient:
@@ -420,6 +566,7 @@ class DashscopeClient:
         return merged[:140] if merged else user_text
 
     async def generate_scene_image(self, scene_prompt: str) -> str:
+        last_error = ""
         for attempt in range(2):
             try:
                 ds_url, ds_err = await asyncio.wait_for(
@@ -428,34 +575,27 @@ class DashscopeClient:
                 )
                 if ds_url:
                     return ds_url
+                last_error = ds_err or last_error
                 if ds_err and "timeout" in ds_err.lower() and attempt == 0:
                     await asyncio.sleep(0.6)
                     continue
                 break
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
+                last_error = str(exc) or "timeout"
                 if attempt == 0:
                     await asyncio.sleep(0.6)
                     continue
                 break
-            except Exception:
+            except Exception as exc:
+                last_error = str(exc)
                 break
 
-        # Fallback for development continuity if DashScope is temporarily unavailable.
+        # Fallback for continuity if DashScope or the browser cannot reach remote image hosts.
         seed = random.randint(100000, 999999)
         clean_scene = (scene_prompt or "温馨儿童绘本场景").strip()
-        subject, setting, palette = _scene_subject_spec(clean_scene)
-        prompt = (
-            "children storybook illustration, 2d hand-painted background, "
-            f"main subject: {subject}, "
-            f"scene setting: {setting}, "
-            f"palette: {palette}, "
-            "single clear focal object, rich details, gentle depth, no text, no logo, not abstract, "
-            f"extra context: {clean_scene}"
-        )
-        return (
-            f"https://image.pollinations.ai/prompt/{quote(prompt)}"
-            f"?width=1600&height=900&nologo=true&seed={seed}&model=flux"
-        )
+        if last_error:
+            logger.warning("scene image generation fell back to local svg: %s", last_error)
+        return _local_scene_image_url(clean_scene, seed)
 
     async def enroll_custom_voice(self, audio_url: str, prefix: str | None = None) -> tuple[str, str, str | None]:
         if not settings.dashscope_api_key:
@@ -467,32 +607,38 @@ class DashscopeClient:
         dashscope.base_http_api_url = settings.dashscope_base_http_api_url
         dashscope.api_key = settings.dashscope_api_key
 
-        service = VoiceEnrollmentService()
-        voice_id = await asyncio.to_thread(
-            service.create_voice,
-            target_model=settings.dashscope_tts_model,
-            prefix=(prefix or settings.dashscope_voice_prefix),
-            url=audio_url,
-        )
-
-        request_id = None
+        req_session = _build_dashscope_requests_session()
         try:
-            request_id = service.get_last_request_id()
-        except Exception:
+            service = VoiceEnrollmentService(session=req_session)
+            with _dashscope_proxy_guard():
+                voice_id = await asyncio.to_thread(
+                    service.create_voice,
+                    target_model=settings.dashscope_tts_model,
+                    prefix=(prefix or settings.dashscope_voice_prefix),
+                    url=audio_url,
+                )
+
             request_id = None
+            try:
+                request_id = service.get_last_request_id()
+            except Exception:
+                request_id = None
 
-        attempts = max(1, settings.dashscope_voice_poll_attempts)
-        interval = max(1, settings.dashscope_voice_poll_interval)
-        for _ in range(attempts):
-            info = await asyncio.to_thread(service.query_voice, voice_id=voice_id)
-            status = str((info or {}).get("status", ""))
-            if status == "OK":
-                return voice_id, status, request_id
-            if status == "UNDEPLOYED":
-                raise RuntimeError("声纹训练失败（UNDEPLOYED），请更换清晰的人声样本重试。")
-            await asyncio.sleep(interval)
+            attempts = max(1, settings.dashscope_voice_poll_attempts)
+            interval = max(1, settings.dashscope_voice_poll_interval)
+            for _ in range(attempts):
+                with _dashscope_proxy_guard():
+                    info = await asyncio.to_thread(service.query_voice, voice_id=voice_id)
+                status = str((info or {}).get("status", ""))
+                if status == "OK":
+                    return voice_id, status, request_id
+                if status == "UNDEPLOYED":
+                    raise RuntimeError("声纹训练失败（UNDEPLOYED），请更换清晰的人声样本重试。")
+                await asyncio.sleep(interval)
 
-        raise RuntimeError("声纹训练超时，请稍后重试。")
+            raise RuntimeError("声纹训练超时，请稍后重试。")
+        finally:
+            req_session.close()
 
     async def synthesize_with_voice(self, voice_id: str, text: str, output_path: Path) -> str | None:
         if not settings.dashscope_api_key:
@@ -511,21 +657,32 @@ class DashscopeClient:
 
         for attempt in range(1, retries + 1):
             try:
-                try:
-                    synthesizer = SpeechSynthesizer(
-                        model=settings.dashscope_tts_model,
-                        voice=voice_id,
-                        instruction=instruction,
-                        seed=settings.dashscope_tts_seed,
+                proxy_context = _dashscope_tts_proxy_env if settings.dashscope_tts_proxy_url else _dashscope_proxy_guard
+                with proxy_context():
+                    try:
+                        synthesizer = SpeechSynthesizer(
+                            model=settings.dashscope_tts_model,
+                            voice=voice_id,
+                            instruction=instruction,
+                            volume=settings.dashscope_tts_volume,
+                            speech_rate=settings.dashscope_tts_speech_rate,
+                            pitch_rate=settings.dashscope_tts_pitch_rate,
+                            seed=settings.dashscope_tts_seed,
+                        )
+                    except TypeError:
+                        synthesizer = SpeechSynthesizer(
+                            model=settings.dashscope_tts_model,
+                            voice=voice_id,
+                            instruction=instruction,
+                            volume=settings.dashscope_tts_volume,
+                            speech_rate=settings.dashscope_tts_speech_rate,
+                            pitch_rate=settings.dashscope_tts_pitch_rate,
+                        )
+                    audio_data = await asyncio.to_thread(
+                        synthesizer.call,
+                        text,
+                        timeout_millis=settings.dashscope_tts_timeout_millis,
                     )
-                except TypeError:
-                    synthesizer = SpeechSynthesizer(
-                        model=settings.dashscope_tts_model,
-                        voice=voice_id,
-                        instruction=instruction,
-                    )
-
-                audio_data = await asyncio.to_thread(synthesizer.call, text)
                 if not audio_data:
                     raise RuntimeError("模型未返回音频数据")
 
@@ -560,7 +717,7 @@ class DashscopeClient:
                     last_error,
                 )
                 if attempt < retries:
-                    await asyncio.sleep(0.35)
+                    await asyncio.sleep(min(4.0, 1.25 * attempt))
 
         raise RuntimeError(f"语音合成失败：{last_error or '未知错误'}")
 

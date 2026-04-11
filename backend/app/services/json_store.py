@@ -17,6 +17,9 @@ class JsonStore:
             "analyses": self.base / "analyses.json",
             "reports": self.base / "reports.json",
             "voices": self.base / "voices.json",
+            "mailbox": self.base / "mailbox.json",
+            "mailbox_clears": self.base / "mailbox_clears.json",
+            "parent_styles": self.base / "parent_styles.json",
         }
         for file in self.files.values():
             if not file.exists():
@@ -51,8 +54,58 @@ class JsonStore:
         rows = [row for row in data if row.get("child_id") == child_id]
         return rows[-limit:]
 
+    def list_by_child(self, key: str, child_id: str) -> list[dict[str, Any]]:
+        data = self._read(key)
+        rows = [row for row in data if row.get("child_id") == child_id]
+        rows.sort(key=lambda row: row.get("timestamp", ""))
+        return rows
+
+    def list_all(self, key: str) -> list[dict[str, Any]]:
+        return self._read(key)
+
     def clear(self, key: str) -> None:
         self._write(key, [])
+
+    def mailbox_clear_timestamp(self, child_id: str, viewer: str) -> str:
+        data = self._read("mailbox_clears")
+        rows = [
+            row
+            for row in data
+            if row.get("child_id") == child_id and row.get("viewer") == viewer
+        ]
+        rows.sort(key=lambda row: row.get("timestamp", ""))
+        return str(rows[-1].get("timestamp", "")) if rows else ""
+
+    def set_mailbox_clear(self, child_id: str, viewer: str) -> str:
+        timestamp = self.now_iso()
+        data = self._read("mailbox_clears")
+        next_data = [
+            row
+            for row in data
+            if not (row.get("child_id") == child_id and row.get("viewer") == viewer)
+        ]
+        next_data.append({"child_id": child_id, "viewer": viewer, "timestamp": timestamp})
+        self._write("mailbox_clears", next_data)
+        return timestamp
+
+    def get_parent_style(self, child_id: str) -> dict[str, Any] | None:
+        data = self._read("parent_styles")
+        rows = [row for row in data if row.get("child_id") == child_id]
+        rows.sort(key=lambda row: row.get("timestamp", ""))
+        return rows[-1] if rows else None
+
+    def set_parent_style(self, child_id: str, use_default: bool, custom_rules: str) -> dict[str, Any]:
+        data = self._read("parent_styles")
+        next_data = [row for row in data if row.get("child_id") != child_id]
+        record = {
+            "child_id": child_id,
+            "use_default": use_default,
+            "custom_rules": custom_rules,
+            "timestamp": self.now_iso(),
+        }
+        next_data.append(record)
+        self._write("parent_styles", next_data)
+        return record
 
     def latest_voice(self, child_id: str) -> dict[str, Any] | None:
         data = self._read("voices")

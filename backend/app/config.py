@@ -31,20 +31,23 @@ class Settings:
         "请按正常口语平稳朗读整段文本，语气保持一致，不要重读、不要强调、不要夸张停顿。",
     )
     dashscope_tts_seed: int = int(os.getenv("DASHSCOPE_TTS_SEED", "20250410"))
-    dashscope_tts_retry_attempts: int = int(os.getenv("DASHSCOPE_TTS_RETRY_ATTEMPTS", "2"))
-    dashscope_tts_min_audio_bytes: int = int(os.getenv("DASHSCOPE_TTS_MIN_AUDIO_BYTES", "120000"))
+    dashscope_tts_retry_attempts: int = int(os.getenv("DASHSCOPE_TTS_RETRY_ATTEMPTS", "3"))
+    dashscope_tts_min_audio_bytes: int = int(os.getenv("DASHSCOPE_TTS_MIN_AUDIO_BYTES", "1000"))
     dashscope_tts_speech_rate: float = float(os.getenv("DASHSCOPE_TTS_SPEECH_RATE", "0.94"))
     dashscope_tts_pitch_rate: float = float(os.getenv("DASHSCOPE_TTS_PITCH_RATE", "0.96"))
     dashscope_tts_volume: int = int(os.getenv("DASHSCOPE_TTS_VOLUME", "55"))
+    dashscope_tts_timeout_millis: int = int(os.getenv("DASHSCOPE_TTS_TIMEOUT_MILLIS", "30000"))
+    dashscope_tts_proxy_url: str = os.getenv("DASHSCOPE_TTS_PROXY_URL", "http://127.0.0.1:7897")
     dashscope_voice_prefix: str = os.getenv("DASHSCOPE_VOICE_PREFIX", "myvoice")
     dashscope_voice_enroll_retry_attempts: int = int(os.getenv("DASHSCOPE_VOICE_ENROLL_RETRY_ATTEMPTS", "3"))
     dashscope_voice_poll_attempts: int = int(os.getenv("DASHSCOPE_VOICE_POLL_ATTEMPTS", "30"))
     dashscope_voice_poll_interval: int = int(os.getenv("DASHSCOPE_VOICE_POLL_INTERVAL", "10"))
+    dashscope_ignore_env_proxy: bool = os.getenv("DASHSCOPE_IGNORE_ENV_PROXY", "true").lower() == "true"
     public_asset_base_url: str = os.getenv("PUBLIC_ASSET_BASE_URL", "")
     cpolar_auto_tunnel: bool = os.getenv("CPOLAR_AUTO_TUNNEL", "true").lower() == "true"
-    cpolar_kill_existing: bool = os.getenv("CPOLAR_KILL_EXISTING", "true").lower() == "true"
+    cpolar_kill_existing: bool = os.getenv("CPOLAR_KILL_EXISTING", "false").lower() == "true"
     cpolar_path: str = os.getenv("CPOLAR_PATH", r"C:\Program Files\cpolar\cpolar.exe")
-    cpolar_start_timeout_sec: int = int(os.getenv("CPOLAR_START_TIMEOUT_SEC", "60"))
+    cpolar_start_timeout_sec: int = int(os.getenv("CPOLAR_START_TIMEOUT_SEC", "120"))
     mock_mode: bool = os.getenv("MOCK_MODE", "true").lower() == "true"
     parent_persona: str = os.getenv(
         "PARENT_PERSONA",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import logging
 from pathlib import Path
 import re
 import shutil
@@ -19,6 +20,10 @@ from app.models import (
     ConversationItem,
     ConversationListResponse,
     DailyReportResponse,
+    MailboxItem,
+    MailboxListResponse,
+    ParentStyleRequest,
+    ParentStyleResponse,
     PraiseResponse,
     VoiceDeleteResponse,
     VoiceEnrollResponse,
@@ -34,6 +39,7 @@ from app.services.json_store import JsonStore
 from app.services.reporting import build_daily_report
 
 app = FastAPI(title="双向陪伴助手", version="0.1.0")
+logger = logging.getLogger(__name__)
 
 app.add_middleware(
     CORSMiddleware,
@@ -59,7 +65,7 @@ PARENT_STYLE_RULES = """
 4) 多用生活化细节和具体鼓励，少用抽象大道理。
 5) 不要使用“建议你、根据你的描述、我理解你、请提供更多信息”等咨询腔。
 6) 当孩子提到被欺负/霸凌时，先安抚，再给出一个可执行的小动作（例如：先告诉老师/先离开现场/先找信任的同学），语气仍要像家长。
-7) 涉及第一人称时不要用“我”，统一用“爸爸妈妈”。
+7) 称呼自己时不要用我，用爸爸妈妈
 """.strip()
 
 
@@ -92,12 +98,21 @@ def _extract_seen_object(text: str) -> str | None:
     return None
 
 
-def _normalize_parent_first_person(text: str) -> str:
-    # Product requirement: parent avatar should use "爸爸妈妈" instead of first-person pronouns.
-    text = re.sub(r"\bI\b", "爸爸妈妈", text)
-    text = text.replace("咱们", "爸爸妈妈")
-    text = text.replace("我们", "爸爸妈妈")
-    text = text.replace("我", "爸爸妈妈")
+def _parent_self_label(parent_style_rules: str) -> str:
+    if re.search(r"自称[“\"']?爸爸[”\"']?", parent_style_rules) or "像孩子的爸爸" in parent_style_rules:
+        return "爸爸"
+    if re.search(r"自称[“\"']?妈妈[”\"']?", parent_style_rules) or "像孩子的妈妈" in parent_style_rules:
+        return "妈妈"
+    return "爸爸妈妈"
+
+
+def _normalize_parent_first_person(text: str, parent_label: str) -> str:
+    # Keep generated replies in the chosen parent voice without rewriting quoted child speech.
+    text = re.sub(r"\bI\b", parent_label, text)
+    text = text.replace("咱们", f"{parent_label}和你")
+    text = text.replace("我们", f"{parent_label}和你")
+    text = re.sub(r"我的", f"{parent_label}的", text)
+    text = re.sub(r"我(在|会|来|陪|听|帮|给|想|知道|明白|看见|看到|记得|去|跟|先|可以|要)", rf"{parent_label}\1", text)
     return text
 
 
@@ -127,6 +142,15 @@ def _should_update_scene(text: str) -> bool:
     return _extract_seen_object(text) is not None
 
 
+def _active_parent_style(child_id: str) -> tuple[bool, str, str]:
+    saved = store.get_parent_style(child_id)
+    use_default = bool(saved.get("use_default", True)) if saved else True
+    custom_rules = str(saved.get("custom_rules", "")).strip() if saved else ""
+    if use_default or not custom_rules:
+        return True, custom_rules, PARENT_STYLE_RULES
+    return False, custom_rules, custom_rules
+
+
 def _normalize_voice_prefix(child_id: str, prefix: str | None) -> str:
     raw = (prefix or "").strip()
     if not raw:
@@ -153,6 +177,13 @@ def _is_retryable_voice_enroll_error(message: str) -> bool:
         "timeout",
         "temporar",
         "connection reset",
+        "ssl",
+        "ssleoferror",
+        "unexpected eof while reading",
+        "proxy",
+        "cpolar",
+        "公网",
+        "限定时间",
     ]
     return any(k in low for k in retry_keys)
 
@@ -173,15 +204,69 @@ def _probe_public_audio_url(url: str) -> str | None:
         return str(exc)
 
 
-async def _auto_tts_reply(child_id: str, text: str) -> str | None:
-    latest = store.latest_voice(child_id)
-    if latest is None:
-        return None
-    voice_id = str(latest.get("voice_id", "")).strip()
+async def _resolve_public_sample_audio_url(
+    request: FastAPIRequest,
+    local_port: int,
+    public_sample_url: str,
+    force_refresh_tunnel: bool,
+) -> str:
+    fixed_base_url = settings.public_asset_base_url.strip().rstrip("/")
+    fixed_probe_error = ""
+    if fixed_base_url:
+        fixed_url = f"{fixed_base_url}{public_sample_url}"
+        fixed_probe_error = await asyncio.to_thread(_probe_public_audio_url, fixed_url)
+        if not fixed_probe_error:
+            return fixed_url
+
+    if settings.cpolar_auto_tunnel:
+        base_url = await asyncio.to_thread(
+            cpolar_tunnel_manager.ensure_public_base_url,
+            local_port,
+            force_refresh_tunnel,
+        )
+        cpolar_url = f"{base_url}{public_sample_url}"
+        probe_err = await asyncio.to_thread(_probe_public_audio_url, cpolar_url)
+        if probe_err:
+            raise RuntimeError(f"公网样本地址不可访问: {probe_err} (audio_url={cpolar_url})")
+        return cpolar_url
+
+    if fixed_base_url:
+        raise RuntimeError(f"固定公网样本地址不可访问: {fixed_probe_error} (audio_url={fixed_base_url}{public_sample_url})")
+
+    return f"{str(request.base_url).rstrip('/')}{public_sample_url}"
+
+
+async def _auto_tts_reply(child_id: str, text: str, voice_id: str | None = None, use_latest: bool = True) -> str | None:
+    voice_id = (voice_id or "").strip()
+    if not voice_id:
+        if not use_latest:
+            return None
+        latest = store.latest_voice(child_id)
+        if latest is None:
+            return None
+        voice_id = str(latest.get("voice_id", "")).strip()
+    else:
+        current_voice_ids = {
+            str(row.get("voice_id", "")).strip()
+            for row in store.list_voices(child_id)
+            if str(row.get("voice_id", "")).strip()
+        }
+        if voice_id not in current_voice_ids:
+            latest = store.latest_voice(child_id)
+            fallback_voice_id = str((latest or {}).get("voice_id", "")).strip()
+            if not fallback_voice_id:
+                return None
+            logger.warning(
+                "requested voice_id is unavailable, falling back to latest: child_id=%s requested=%s fallback=%s",
+                child_id,
+                voice_id,
+                fallback_voice_id,
+            )
+            voice_id = fallback_voice_id
     if not voice_id:
         return None
 
-    output_name = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{child_id}_reply_tts.mp3"
+    output_name = f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{child_id}_reply_tts.mp3"
     output_path = upload_dir / output_name
     tts_text = _prepare_tts_text(text)
     if not tts_text:
@@ -189,7 +274,8 @@ async def _auto_tts_reply(child_id: str, text: str) -> str | None:
     try:
         await client.synthesize_with_voice(voice_id, tts_text, output_path)
         return f"/uploads/{output_name}"
-    except Exception:
+    except Exception as exc:
+        logger.warning("auto tts failed: child_id=%s voice_id=%s error=%s", child_id, voice_id, exc)
         return None
 
 
@@ -198,12 +284,40 @@ async def health() -> dict:
     return {"ok": True, "mock_mode": client.mock_mode}
 
 
+@app.get("/api/parent-style", response_model=ParentStyleResponse)
+async def get_parent_style(child_id: str = "default-child") -> ParentStyleResponse:
+    use_default, custom_rules, active_rules = _active_parent_style(child_id)
+    return ParentStyleResponse(
+        child_id=child_id,
+        use_default=use_default,
+        custom_rules=custom_rules,
+        default_rules=PARENT_STYLE_RULES,
+        active_rules=active_rules,
+    )
+
+
+@app.post("/api/parent-style", response_model=ParentStyleResponse)
+async def save_parent_style(payload: ParentStyleRequest) -> ParentStyleResponse:
+    custom_rules = payload.custom_rules.strip()
+    store.set_parent_style(payload.child_id, payload.use_default, custom_rules)
+    use_default, custom_rules, active_rules = _active_parent_style(payload.child_id)
+    return ParentStyleResponse(
+        child_id=payload.child_id,
+        use_default=use_default,
+        custom_rules=custom_rules,
+        default_rules=PARENT_STYLE_RULES,
+        active_rules=active_rules,
+    )
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest) -> ChatResponse:
     timestamp = datetime.now()
     history = store.conversation_tail(req.child_id, limit=8)
 
-    system_prompt = f"{settings.parent_persona}\n\n{PARENT_STYLE_RULES}"
+    _, _, parent_style_rules = _active_parent_style(req.child_id)
+    parent_label = _parent_self_label(parent_style_rules)
+    system_prompt = f"{settings.parent_persona}\n\n{parent_style_rules}"
     messages = [{"role": "system", "content": system_prompt}]
     for item in history:
         messages.append({"role": item.get("role", "user"), "content": item.get("content", "")})
@@ -217,9 +331,9 @@ async def chat(req: ChatRequest) -> ChatResponse:
             "我在呢，刚刚网络有点抖动。"
             f"你提到‘{req.message[:20]}’，这件事听起来对你很重要，愿意再多说一点吗？"
         )
-    reply = _normalize_parent_first_person(reply)
+    reply = _normalize_parent_first_person(reply, parent_label)
     scene_image_url = None
-    assistant_audio_url = await _auto_tts_reply(req.child_id, reply)
+    assistant_audio_url = await _auto_tts_reply(req.child_id, reply, req.voice_id, req.voice_id is None)
 
     store.append(
         "conversations",
@@ -269,6 +383,7 @@ async def praise_image(
     image: UploadFile = File(...),
     child_id: str = Form("default-child"),
     text: str = Form("看我画的"),
+    voice_id: str | None = Form(None),
 ) -> PraiseResponse:
     ext = Path(image.filename or "image.jpg").suffix or ".jpg"
     image_path = upload_dir / f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{child_id}{ext}"
@@ -277,7 +392,7 @@ async def praise_image(
 
     reply = await client.vision_praise(image_path, text)
     scene_image_url = None
-    assistant_audio_url = await _auto_tts_reply(child_id, reply)
+    assistant_audio_url = await _auto_tts_reply(child_id, reply, voice_id, voice_id is None)
     if _should_update_scene(text):
         scene_prompt = await client.scene_prompt_from_image(image_path, text, reply)
         scene_image_url = await client.generate_scene_image(scene_prompt)
@@ -313,6 +428,78 @@ async def praise_image(
     )
 
 
+@app.get("/api/mailbox", response_model=MailboxListResponse)
+async def list_mailbox(child_id: str = "default-child", viewer: str | None = None) -> MailboxListResponse:
+    rows = store.list_by_child("mailbox", child_id)
+    normalized_viewer = (viewer or "").strip()
+    if normalized_viewer:
+        clear_after = store.mailbox_clear_timestamp(child_id, normalized_viewer)
+        if clear_after:
+            rows = [row for row in rows if str(row.get("timestamp", "")) > clear_after]
+    items = [
+        MailboxItem(
+            child_id=str(row.get("child_id", child_id)),
+            sender=str(row.get("sender", "")),
+            content=str(row.get("content", "")),
+            message_type=str(row.get("message_type", "text") or "text"),
+            audio_url=(str(row.get("audio_url", "")).strip() or None),
+            timestamp=str(row.get("timestamp", "")),
+        )
+        for row in rows
+    ]
+    return MailboxListResponse(child_id=child_id, items=items)
+
+
+@app.post("/api/mailbox/clear")
+async def clear_mailbox(
+    child_id: str = Form("default-child"),
+    viewer: str = Form("child"),
+) -> dict[str, str | bool]:
+    normalized_viewer = viewer.strip() or "child"
+    timestamp = store.set_mailbox_clear(child_id, normalized_viewer)
+    return {
+        "ok": True,
+        "child_id": child_id,
+        "viewer": normalized_viewer,
+        "timestamp": timestamp,
+    }
+
+
+@app.post("/api/mailbox", response_model=MailboxItem)
+async def create_mailbox_item(
+    child_id: str = Form("default-child"),
+    sender: str = Form("child"),
+    text: str = Form(""),
+    audio: UploadFile | None = File(None),
+) -> MailboxItem:
+    content = text.strip()
+    audio_url = None
+    message_type = "text"
+
+    if audio is not None:
+        ext = Path(audio.filename or "message.wav").suffix.lower() or ".wav"
+        if ext != ".wav":
+            raise HTTPException(status_code=400, detail="留言音频必须是 .wav 文件。")
+        audio_path = upload_dir / f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{child_id}_mailbox{ext}"
+        audio_path.write_bytes(await audio.read())
+        audio_url = f"/uploads/{audio_path.name}"
+        message_type = "audio"
+
+    if not content and not audio_url:
+        raise HTTPException(status_code=400, detail="留言内容不能为空。")
+
+    payload = {
+        "child_id": child_id,
+        "sender": sender.strip() or "child",
+        "content": content,
+        "message_type": message_type,
+        "audio_url": audio_url,
+        "timestamp": store.now_iso(),
+    }
+    store.append("mailbox", payload)
+    return MailboxItem(**payload)
+
+
 @app.post("/api/voice/enroll", response_model=VoiceEnrollResponse)
 async def enroll_voice(
     request: FastAPIRequest,
@@ -342,28 +529,20 @@ async def enroll_voice(
             and attempt > 1
             and (
                 "公网样本地址不可访问" in last_error
+                or "固定公网样本地址不可访问" in last_error
+                or "cpolar" in last_error.lower()
+                or "限定时间" in last_error
                 or "inputdownloadfailed" in last_error.lower()
                 or "download audio failed" in last_error.lower()
             )
         )
         try:
-            if settings.cpolar_auto_tunnel:
-                base_url = await asyncio.to_thread(
-                    cpolar_tunnel_manager.ensure_public_base_url,
-                    local_port,
-                    force_refresh_tunnel,
-                )
-            elif settings.public_asset_base_url.strip():
-                base_url = settings.public_asset_base_url.strip().rstrip("/")
-            else:
-                base_url = str(request.base_url).rstrip("/")
-
-            audio_url_for_dashscope = f"{base_url}{public_sample_url}"
-            if settings.cpolar_auto_tunnel:
-                probe_err = await asyncio.to_thread(_probe_public_audio_url, audio_url_for_dashscope)
-                if probe_err:
-                    raise RuntimeError(f"公网样本地址不可访问: {probe_err}")
-
+            audio_url_for_dashscope = await _resolve_public_sample_audio_url(
+                request,
+                local_port,
+                public_sample_url,
+                force_refresh_tunnel,
+            )
             voice_id, status, request_id = await client.enroll_custom_voice(audio_url_for_dashscope, safe_prefix)
             break
         except Exception as exc:
@@ -415,7 +594,7 @@ async def synthesize_voice(req: VoiceSynthesizeRequest) -> VoiceSynthesizeRespon
     if not voice_id:
         raise HTTPException(status_code=400, detail="voice_id 无效，请重新注册。")
 
-    output_name = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{req.child_id}_tts.mp3"
+    output_name = f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{req.child_id}_tts.mp3"
     output_path = upload_dir / output_name
     try:
         request_id = await client.synthesize_with_voice(voice_id, text, output_path)
@@ -477,20 +656,30 @@ async def daily_report(child_id: str = "default-child", day: str | None = None) 
         "date": day,
         **result,
     }
-    store.append("reports", payload | {"timestamp": store.now_iso()})
 
     return DailyReportResponse(**payload)
 
 
 @app.post("/api/history/reset")
 async def reset_history() -> dict:
-    # Reset chat history, report data, and generated/uploaded assets in one action.
+    # Reset AI chat/report assets while keeping mailbox attachments independent.
     store.clear("conversations")
     store.clear("analyses")
     store.clear("reports")
 
+    mailbox_audio_files: set[str] = set()
+    for row in store.list_all("mailbox"):
+        audio_url = row.get("audio_url")
+        if not audio_url:
+            continue
+        filename = Path(str(audio_url).split("?", 1)[0]).name
+        if filename:
+            mailbox_audio_files.add(filename)
+
     deleted_upload_items = 0
     for item in upload_dir.iterdir():
+        if item.name in mailbox_audio_files:
+            continue
         if item.is_file() or item.is_symlink():
             item.unlink(missing_ok=True)
             deleted_upload_items += 1
