@@ -2,7 +2,7 @@
 
 面向亲子沟通场景的双向陪伴助手，支持聊天陪伴、图片夸夸、语音克隆朗读、心理信号分析和日报。
 
-## 最新说明（2026-04-11）
+## 最新说明（2026-04-12）
 
 当前版本已经拆成两个独立前端页面：
 
@@ -18,6 +18,8 @@
 留言箱是独立聊天框，孩子端和父母端都有。留言箱支持文字和麦克风录音，不支持本地上传音频文件；孩子端清空留言只影响孩子端视图，父母端清空留言只影响父母端视图。清空 AI 历史记录不会删除留言箱引用的音频文件。
 
 场景背景图会在孩子描述“看见/看到/遇到/发现”等场景时触发。后端优先使用 DashScope 生成图片；如果远程图片生成或图链访问失败，会生成本地 `/uploads/scene_*.svg` 兜底背景，避免页面空白。
+
+当前默认不走代理。`DASHSCOPE_TTS_PROXY_URL` 和 `DASHSCOPE_COMPATIBLE_PROXY_URL` 为空时，后端会直连 DashScope，并在调用时清理系统代理环境变量，避免本机残留代理影响请求。如果云服务器或本机必须走代理，再在 `.env` 中显式填写代理地址。
 
 ## 技术栈
 
@@ -60,6 +62,23 @@
 1. Python 3.10+
 2. Node.js 18+
 3. npm 9+
+
+## 一键配置并运行（克隆后推荐）
+
+在 Windows PowerShell 里执行：
+
+```powershell
+Set-Location "d:\声影随行"
+.\scripts\bootstrap_run.ps1 -OpenBrowser
+```
+
+这个脚本会自动：
+
+1. 检查 Python/Node/npm 是否可用
+2. 若缺失则从 `backend/.env.example` 生成 `backend/.env`
+3. 调用现有启动链路完成依赖安装与双前端+后端启动
+
+首次运行后，如果提示 `DASHSCOPE_API_KEY` 未设置，请编辑 `backend/.env` 填入真实 Key。
 
 ## 首次安装（Windows）
 
@@ -147,6 +166,38 @@ npm run dev -- --host 127.0.0.1 --port 5174 --strictPort
 3. 设定保存到 `backend/data/parent_styles.json`。
 4. 如果自定义规则写“像孩子的爸爸”或“自称爸爸”，后端自称规范化会倾向“爸爸”；写“妈妈”则倾向“妈妈”；默认模式使用“爸爸妈妈”。
 
+## 代理配置
+
+默认不走代理：
+
+```env
+DASHSCOPE_IGNORE_ENV_PROXY=true
+DASHSCOPE_TTS_PROXY_URL=
+DASHSCOPE_COMPATIBLE_PROXY_URL=
+```
+
+含义：
+
+1. `DASHSCOPE_IGNORE_ENV_PROXY=true`：调用 DashScope 时忽略系统里的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等环境变量。
+2. `DASHSCOPE_TTS_PROXY_URL`：只控制 CosyVoice TTS websocket 语音合成。留空表示直连。
+3. `DASHSCOPE_COMPATIBLE_PROXY_URL`：控制文本、视觉、图片相关的 OpenAI-compatible 请求。留空表示直连。
+
+如果云服务器上确实需要代理，可以显式配置：
+
+```env
+DASHSCOPE_TTS_PROXY_URL=http://127.0.0.1:7897
+DASHSCOPE_COMPATIBLE_PROXY_URL=http://127.0.0.1:7897
+```
+
+也可以填远程代理，例如：
+
+```env
+DASHSCOPE_TTS_PROXY_URL=http://proxy.example.com:7897
+DASHSCOPE_COMPATIBLE_PROXY_URL=http://proxy.example.com:7897
+```
+
+注意：只有在对应代理服务真实可用时才填写；否则语音合成可能出现 websocket 建连失败。
+
 ## 留言箱
 
 1. 孩子端和父母端都有留言箱。
@@ -211,16 +262,17 @@ if ($p3) { Stop-Process -Id $p3 -Force }
 6. DASHSCOPE_TTS_SEED：语音稳定随机种子
 7. DASHSCOPE_TTS_RETRY_ATTEMPTS：语音失败重试次数
 8. DASHSCOPE_TTS_MIN_AUDIO_BYTES：最小音频体积阈值
-9. DASHSCOPE_TTS_PROXY_URL：TTS websocket 代理地址，默认 `http://127.0.0.1:7897`
-10. DASHSCOPE_VOICE_PREFIX：声纹 ID 前缀
-11. PUBLIC_ASSET_BASE_URL：部署公网地址（已配置时优先使用）
-12. CPOLAR_AUTO_TUNNEL：未配置 PUBLIC_ASSET_BASE_URL 时是否自动拉起 cpolar（默认 true）
-13. CPOLAR_KILL_EXISTING：启动新隧道前是否自动清理旧 cpolar 进程（默认 false）
-14. CPOLAR_PATH：cpolar 可执行文件路径
-15. CPOLAR_START_TIMEOUT_SEC：等待 cpolar 返回公网地址的超时时间（秒）
-16. PARENT_PERSONA：基础家长人格设定
-17. MOCK_MODE：false 为真实调用，true 为本地兜底
-18. DATA_DIR：数据目录，默认 ./data
+9. DASHSCOPE_TTS_PROXY_URL：TTS websocket 代理地址，默认空，表示不走代理
+10. DASHSCOPE_COMPATIBLE_PROXY_URL：文本/视觉 OpenAI-compatible 请求代理地址，默认空，表示不走代理
+11. DASHSCOPE_VOICE_PREFIX：声纹 ID 前缀
+12. PUBLIC_ASSET_BASE_URL：部署公网地址（已配置时优先使用）
+13. CPOLAR_AUTO_TUNNEL：未配置 PUBLIC_ASSET_BASE_URL 时是否自动拉起 cpolar（默认 true）
+14. CPOLAR_KILL_EXISTING：启动新隧道前是否自动清理旧 cpolar 进程（默认 false）
+15. CPOLAR_PATH：cpolar 可执行文件路径
+16. CPOLAR_START_TIMEOUT_SEC：等待 cpolar 返回公网地址的超时时间（秒）
+17. PARENT_PERSONA：基础家长人格设定
+18. MOCK_MODE：false 为真实调用，true 为本地兜底
+19. DATA_DIR：数据目录，默认 ./data
 
 ## API 概览
 
@@ -244,11 +296,12 @@ if ($p3) { Stop-Process -Id $p3 -Force }
 1. 后端无法启动：先检查 8001 是否被占用，再重启。
 2. 前端端口：孩子端固定 5173，父母端固定 5174；如果端口被占用，先运行 `scripts/stop_all.ps1` 再启动。
 3. 声纹注册失败：通常是 cpolar 未启动成功、样本 URL 无法公网访问，或音频质量不足。
-4. 视觉或语音偶发失败：优先检查 DashScope 配额、限流、模型开通状态和本地代理。
+4. 视觉或语音偶发失败：优先检查 DashScope 配额、限流和模型开通状态；如果你显式配置了代理，再检查代理是否可用。
 5. 若报错包含 `ERR_CPOLAR_108`：表示 cpolar 会话超限，重试一次即可（后端会自动清理旧会话）。
 6. 回复没有声音：先看 `backend/uvicorn.err.log` 是否有 TTS websocket 失败；也可以用 `POST /api/voice/synthesize` 单独测试人声。
 7. 背景图没有出现：检查 `/api/chat` 返回里是否有 `scene_image_url`；远程图失败时后端会返回本地 SVG 兜底。
 8. 自定义爸爸/妈妈语气不生效：确认父母端没有勾选“使用默认家长语气”，并点击保存设定。
+9. 云服务器部署：国内云服务器建议先保持代理为空直连 DashScope；只有直连失败时再配置代理。
 
 ## 安全建议
 

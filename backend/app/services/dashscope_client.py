@@ -127,8 +127,8 @@ def _classify_dashscope_error(err: Exception) -> str:
     msg = str(err).strip()
     low = msg.lower()
 
-    if any(k in low for k in ["connection refused", "failed to establish", "proxy", "10061", "127.0.0.1:7897"]):
-        return "本地代理不可用，请确认代理已开启且端口为 127.0.0.1:7897。"
+    if any(k in low for k in ["connection refused", "failed to establish", "proxy", "10061"]):
+        return "网络连接失败；如果配置了代理，请确认代理可用，否则请清空代理环境变量后重试。"
     if any(k in low for k in ["ssleoferror", "unexpected eof while reading", "tlsv1 alert", "ssl"]):
         return "TLS 握手异常（可能由代理或网络中断导致），建议先关闭系统代理后重试。"
     if any(k in low for k in ["timed out", "timeout", "deadline", "readtimeout", "connecttimeout"]):
@@ -222,11 +222,16 @@ def _dashscope_tts_proxy_env():
 
 @contextmanager
 def _vision_proxy_env():
-    proxy = "http://127.0.0.1:7897"
+    proxy = (settings.dashscope_compatible_proxy_url or "").strip()
+    if not proxy:
+        with _dashscope_proxy_guard():
+            yield
+        return
+
     keys = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"]
     prev = {k: os.environ.get(k) for k in keys}
 
-    # Force multimodal request through local proxy, while keeping localhost direct.
+    # Optional multimodal proxy, while keeping localhost direct.
     os.environ["HTTP_PROXY"] = proxy
     os.environ["HTTPS_PROXY"] = proxy
     os.environ["ALL_PROXY"] = proxy
