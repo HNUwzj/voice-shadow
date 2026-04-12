@@ -115,6 +115,92 @@ Set-Location "d:\声影随行"
 .\scripts\start_all.ps1 -OpenBrowser
 ```
 
+## Docker 部署
+
+项目已经提供 Docker 配置：
+
+1. `backend/Dockerfile`：FastAPI 后端镜像
+2. `frontend/Dockerfile`：Vue 构建 + Nginx 静态服务
+3. `frontend/nginx.conf`：同源反代 `/api/` 和 `/uploads/`
+4. `docker-compose.yml`：一键启动前后端
+
+### 本地 Docker 运行
+
+先准备后端环境变量：
+
+```powershell
+Set-Location "d:\声影随行"
+Copy-Item backend\.env.example backend\.env -ErrorAction SilentlyContinue
+notepad backend\.env
+```
+
+至少填写：
+
+```env
+DASHSCOPE_API_KEY=你的DashScope Key
+MOCK_MODE=false
+DASHSCOPE_TTS_PROXY_URL=
+DASHSCOPE_COMPATIBLE_PROXY_URL=
+CPOLAR_AUTO_TUNNEL=false
+PUBLIC_ASSET_BASE_URL=http://localhost
+```
+
+启动：
+
+```powershell
+Set-Location "d:\声影随行"
+docker compose up -d --build
+```
+
+访问：
+
+1. 孩子端：http://localhost/
+2. 父母端：http://localhost/parent
+3. 后端文档：http://localhost/docs
+4. 后端接口：http://localhost/api/
+5. 上传资源：http://localhost/uploads/
+
+停止：
+
+```powershell
+docker compose down
+```
+
+查看日志：
+
+```powershell
+docker compose logs -f backend
+docker compose logs -f frontend
+```
+
+### 云服务器 Docker 部署
+
+云服务器上推荐使用域名和 HTTPS。假设域名是：
+
+```text
+https://your-domain.com
+```
+
+后端 `.env` 建议：
+
+```env
+DASHSCOPE_API_KEY=你的DashScope Key
+MOCK_MODE=false
+DATA_DIR=/app/data
+PUBLIC_ASSET_BASE_URL=https://your-domain.com
+CPOLAR_AUTO_TUNNEL=false
+DASHSCOPE_IGNORE_ENV_PROXY=true
+DASHSCOPE_TTS_PROXY_URL=
+DASHSCOPE_COMPATIBLE_PROXY_URL=
+```
+
+说明：
+
+1. `PUBLIC_ASSET_BASE_URL` 很重要。声纹注册时 DashScope 需要公网可访问的样本音频 URL，Docker 云部署时应填你的公网域名。
+2. 云服务器默认不走代理；如果直连 DashScope 失败，再填写 `DASHSCOPE_TTS_PROXY_URL` 和 `DASHSCOPE_COMPATIBLE_PROXY_URL`。
+3. 当前 compose 会把后端数据放到 Docker volume `backend_data`，容器重建不会丢数据。
+4. 如果服务器 80 端口已经被 Nginx/Caddy 占用，可以把 `docker-compose.yml` 里的前端端口改成 `"8080:80"`，再由宿主机 Nginx/Caddy 反代到 `127.0.0.1:8080`。
+
 ### 1. 启动后端（端口 8001）
 
 ```powershell

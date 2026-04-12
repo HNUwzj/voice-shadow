@@ -87,7 +87,7 @@ export type MailboxListResponse = {
   items: MailboxItem[]
 }
 
-const API_BASE = 'http://127.0.0.1:8001'
+const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 
 async function readErrorMessage(res: Response, fallback: string): Promise<string> {
   try {

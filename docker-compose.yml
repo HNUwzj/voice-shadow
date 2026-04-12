@@ -1,0 +1,30 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      DATA_DIR: /app/data
+      CPOLAR_AUTO_TUNNEL: "false"
+      DASHSCOPE_TTS_PROXY_URL: ""
+      DASHSCOPE_COMPATIBLE_PROXY_URL: ""
+    volumes:
+      - backend_data:/app/data
+    ports:
+      - "8001:8001"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE: ""
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+    restart: unless-stopped
+
+volumes:
+  backend_data:

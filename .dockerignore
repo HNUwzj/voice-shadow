@@ -1,0 +1,11 @@
+.git
+.vscode
+backend/.env
+backend/.venv
+backend/data
+backend/uvicorn*.log
+frontend/node_modules
+frontend/dist
+frontend/*.log
+__pycache__
+*.pyc
