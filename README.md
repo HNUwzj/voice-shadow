@@ -1,395 +1,405 @@
-# 声影随行
+﻿# 声影随行 Voice Shadow
 
-面向亲子沟通场景的双向陪伴助手，支持聊天陪伴、图片夸夸、语音克隆朗读、心理信号分析和日报。
+《声影随行》是一款面向留守儿童与父母的双端陪伴系统。项目包含孩子端和父母端两个前端页面，孩子端用于日常表达与 AI 陪伴互动，父母端用于查看心理日报、注册父母人声、设置回复语气和处理留言。
 
-## 最新说明（2026-04-12）
+系统结合阿里云 DashScope 的文本理解、图像理解、图像生成、语音合成和声纹注册能力，目标是让孩子在远程场景中获得更自然的陪伴感，同时帮助父母及时了解孩子的情绪线索。
 
-当前版本已经拆成两个独立前端页面：
+## 主要功能
 
-1. 孩子端：http://127.0.0.1:5173/
-2. 父母端：http://127.0.0.1:5174/
-3. 后端：http://127.0.0.1:8001
-4. 后端文档：http://127.0.0.1:8001/docs
-
-父母端包含心理日报、人声注册、已注册人声管理、留言箱，以及“回复设定”。“回复设定”可以勾选使用默认家长语气，也就是后端 `backend/app/main.py` 里的 `PARENT_STYLE_RULES`；取消勾选后可以输入自定义提示词，保存后孩子端后续 AI 聊天会使用这段自定义规则。设定保存到 `backend/data/parent_styles.json`。
-
-孩子端包含 AI 聊天、图片上传、声音选择和留言箱。声音选择权在孩子端；选择“暂不使用人声”时，AI 回复不生成语音；选择已注册人声时，AI 回复会生成音频。聊天里的文字消息不会显示播放控件，只有可播放语音才显示播放控件。
-
-留言箱是独立聊天框，孩子端和父母端都有。留言箱支持文字和麦克风录音，不支持本地上传音频文件；孩子端清空留言只影响孩子端视图，父母端清空留言只影响父母端视图。清空 AI 历史记录不会删除留言箱引用的音频文件。
-
-场景背景图会在孩子描述“看见/看到/遇到/发现”等场景时触发。后端优先使用 DashScope 生成图片；如果远程图片生成或图链访问失败，会生成本地 `/uploads/scene_*.svg` 兜底背景，避免页面空白。
-
-当前默认不走代理。`DASHSCOPE_TTS_PROXY_URL` 和 `DASHSCOPE_COMPATIBLE_PROXY_URL` 为空时，后端会直连 DashScope，并在调用时清理系统代理环境变量，避免本机残留代理影响请求。如果云服务器或本机必须走代理，再在 `.env` 中显式填写代理地址。
+- 孩子端 AI 聊天
+- 孩子端文字输入和图片上传
+- 孩子端选择父母人声或暂不使用人声
+- AI 回复可生成语音并播放
+- 父母端心理日报
+- 父母端人声注册和人声管理
+- 父母端自定义 AI 回复语气
+- 双端留言箱
+- 留言、对话、日报、人声和上传资源持久化
+- Docker 云服务器部署
 
 ## 技术栈
 
-1. 后端：FastAPI
-2. 前端：Vue 3 + Vite
-3. 存储：本地 JSON
-4. 大模型与语音：DashScope（Qwen + CosyVoice）
+- 前端：Vue 3、Vite、TypeScript、Nginx
+- 后端：Python、FastAPI、Uvicorn、Pydantic
+- 数据存储：本地 JSON 文件和上传资源目录
+- 部署：Docker、Docker Compose
+- 模型服务：阿里云 DashScope
 
-## 当前能力
+使用到的 DashScope 模型：
 
-1. 双页面：孩子端 5173，父母端 5174
-2. 孩子端亲子口吻 AI 聊天，自动保存当天会话
-3. AI 聊天支持文字和可选图片上传
-4. 孩子端选择是否使用已注册人声
-5. 图片上传后生成夸夸回复
-6. 场景描述触发背景图更新，支持本地兜底背景
-7. 心理信号分析与父母端日报实时更新
-8. 父母端声纹注册、语音列表、语音删除
-9. 父母端自定义 AI 回复设定，或使用默认 `PARENT_STYLE_RULES`
-10. 双端留言箱，支持文字和麦克风语音留言
-11. 当天会话恢复，刷新不丢当天 AI 历史
-12. AI 历史清空与留言箱清空分离
+- `qwen3.5-flash`：文本对话
+- `qwen3-vl-flash`：图像理解
+- `wan2.7-image`：图像生成
+- `cosyvoice-v3.5-flash`：声纹注册与语音合成
+
+说明：Vite 主要用于本地开发和前端构建。云服务器 Docker 部署时，Vite 会在镜像构建阶段执行 `npm run build`，生成静态前端文件；真正对外提供页面服务的是前端容器里的 Nginx，不是 Vite dev server。远程仓库默认按云服务器部署版维护，本地 Vite 代理配置只作为开发说明，不要求提交到远程仓库。
 
 ## 项目结构
 
-1. backend：后端服务
-2. frontend：前端页面
-3. .gitignore：版本控制忽略规则
-4. backend/data/conversations.json：对话记录
-5. backend/data/analyses.json：分析记录
-6. backend/data/reports.json：日报缓存
-7. backend/data/uploads：上传文件与生成音频
-8. backend/data/voices.json：已注册人声
-9. backend/data/mailbox.json：留言箱消息
-10. backend/data/mailbox_clears.json：双端留言箱清空状态
-11. backend/data/parent_styles.json：父母端回复设定
-
-## 环境要求
-
-1. Python 3.10+
-2. Node.js 18+
-3. npm 9+
-
-## 一键配置并运行（克隆后推荐）
-
-在 Windows PowerShell 里执行：
-
-```powershell
-Set-Location "d:\声影随行"
-.\scripts\bootstrap_run.ps1 -OpenBrowser
+```text
+Voice-Shadow/
+├─ backend/
+│  ├─ app/                    # FastAPI 后端代码
+│  ├─ data/                   # 本地数据目录
+│  │  └─ uploads/             # 上传文件和生成音频
+│  ├─ Dockerfile
+│  ├─ requirements.txt
+│  └─ .env.example
+├─ frontend/
+│  ├─ src/                    # Vue 前端源码
+│  ├─ Dockerfile
+│  ├─ nginx.conf              # Docker 前端 Nginx 反代配置
+│  ├─ package.json
+│  └─ vite.config.ts
+├─ scripts/                   # 本地启动和停止脚本
+├─ docker-compose.yml
+└─ README.md
 ```
 
-这个脚本会自动：
+## 云服务器部署
 
-1. 检查 Python/Node/npm 是否可用
-2. 若缺失则从 `backend/.env.example` 生成 `backend/.env`
-3. 调用现有启动链路完成依赖安装与双前端+后端启动
+以下步骤以 Ubuntu 22.04 云服务器为例。推荐优先使用 Docker Compose 部署。
 
-首次运行后，如果提示 `DASHSCOPE_API_KEY` 未设置，请编辑 `backend/.env` 填入真实 Key。
+### 1. 开放安全组端口
 
-## 首次安装（Windows）
+在云服务器安全组中放行：
 
-### 1. 后端依赖
+```text
+TCP 22    SSH 登录
+TCP 80    Web 页面访问
+TCP 8001  后端接口调试，可选
+```
+
+正常使用页面时只需要访问 80 端口；`8001` 主要用于调试。
+
+### 2. 安装 Docker、Docker Compose 和 Git
+
+```bash
+apt update
+apt install -y docker.io docker-compose git
+systemctl enable docker
+systemctl start docker
+```
+
+检查安装：
+
+```bash
+docker --version
+docker-compose --version
+```
+
+### 3. 拉取项目
+
+```bash
+cd /opt
+git clone https://github.com/HNUwzj/Voice-Shadow.git
+cd Voice-Shadow
+```
+
+### 4. 配置环境变量
+
+复制环境变量模板：
+
+```bash
+cp backend/.env.example backend/.env
+nano backend/.env
+```
+
+至少需要填写：
+
+```env
+DASHSCOPE_API_KEY=你的DashScope API Key
+DASHSCOPE_BASE_HTTP_API_URL=https://dashscope.aliyuncs.com/api/v1
+DASHSCOPE_IGNORE_ENV_PROXY=true
+DASHSCOPE_TTS_PROXY_URL=
+DASHSCOPE_COMPATIBLE_PROXY_URL=
+DASHSCOPE_IMAGE_MODEL=wan2.7-image
+DASHSCOPE_IMAGE_SIZE=2K
+MOCK_MODE=false
+PUBLIC_ASSET_BASE_URL=http://你的服务器公网IP
+CPOLAR_AUTO_TUNNEL=false
+```
+
+例如服务器公网 IP 是 `8.163.84.168`：
+
+```env
+PUBLIC_ASSET_BASE_URL=http://8.163.84.168
+```
+
+`PUBLIC_ASSET_BASE_URL` 用于生成公网可访问的上传资源地址。声纹注册时，DashScope 需要通过这个地址下载人声音频样本，因此它必须是外部可以访问的地址。
+
+不要把真实的 `DASHSCOPE_API_KEY` 提交到 GitHub。
+
+### 5. 启动服务
+
+云服务器运行时不需要单独启动 Vite。前端构建会在 Docker 镜像中完成，运行阶段由 Nginx 提供静态页面，并把 `/api/` 和 `/uploads/` 反向代理到后端。
+
+```bash
+docker-compose up -d --build
+```
+
+查看容器状态：
+
+```bash
+docker-compose ps
+```
+
+正常情况下应看到：
+
+```text
+voice-shadow_backend_1    Up    0.0.0.0:8001->8001/tcp
+voice-shadow_frontend_1   Up    0.0.0.0:80->80/tcp
+```
+
+### 6. 验证服务
+
+在服务器执行：
+
+```bash
+curl -I http://127.0.0.1/
+curl "http://127.0.0.1/api/voice/list?child_id=default-child"
+curl "http://127.0.0.1/api/report/daily?child_id=default-child"
+```
+
+如果首页返回 `200 OK`，接口返回 JSON，说明服务已经启动成功。
+
+### 7. 访问地址
+
+使用公网 IP 访问：
+
+```text
+孩子端：http://服务器公网IP/
+父母端：http://服务器公网IP/parent
+```
+
+例如：
+
+```text
+孩子端：http://8.163.84.168/
+父母端：http://8.163.84.168/parent
+```
+
+前端容器中的 Nginx 会把 `/api/` 和 `/uploads/` 自动反向代理到后端容器。
+
+## 更新部署
+
+服务器上拉取最新代码并重建：
+
+```bash
+cd /opt/Voice-Shadow
+git pull
+docker-compose up -d --build
+```
+
+查看日志：
+
+```bash
+docker-compose logs --tail=100 backend
+docker-compose logs --tail=100 frontend
+```
+
+持续查看日志：
+
+```bash
+docker-compose logs -f backend
+docker-compose logs -f frontend
+```
+
+停止服务：
+
+```bash
+docker-compose down
+```
+
+注意：`docker-compose down` 不会删除数据卷；`docker-compose down -v` 会删除后端数据卷，聊天记录、人声、上传文件和日报都会丢失。
+
+## 从头清理服务器部署
+
+如果需要彻底删除旧部署并重新开始：
+
+```bash
+cd /opt/Voice-Shadow 2>/dev/null || true
+docker-compose down -v --remove-orphans 2>/dev/null || true
+docker rm -f voice-shadow_backend_1 voice-shadow_frontend_1 voice-shadow_caddy_1 2>/dev/null || true
+docker volume rm voice-shadow_backend_data voice-shadow_caddy_data voice-shadow_caddy_config 2>/dev/null || true
+cd /opt
+rm -rf /opt/Voice-Shadow
+```
+
+然后重新执行“拉取项目”之后的部署步骤。
+
+## docker-compose 兼容问题
+
+部分 Ubuntu 源里的 `docker-compose 1.29.2` 在重建容器时可能出现：
+
+```text
+KeyError: 'ContainerConfig'
+```
+
+通常是旧容器元数据兼容问题。可以先查看残留容器：
+
+```bash
+docker ps -a
+```
+
+然后删除报错相关的旧容器：
+
+```bash
+docker rm -f 旧容器名
+docker-compose up -d
+```
+
+如果容器名带随机前缀，例如：
+
+```text
+e1bbb3d954fe_voice-shadow_frontend_1
+```
+
+就删除实际显示的完整容器名。
+
+## 公网访问和麦克风说明
+
+当前部署可以直接使用公网 IP + HTTP 访问页面：
+
+```text
+http://服务器公网IP/
+http://服务器公网IP/parent
+```
+
+已有语音播放不依赖 HTTPS，可以正常播放。但浏览器对麦克风权限有安全限制，公网 HTTP 页面可能无法稳定使用麦克风录音。
+
+如果需要稳定使用麦克风，建议后续配置：
+
+```text
+域名 + HTTPS 证书 + 反向代理
+```
+
+如果浏览器自动把 `http://服务器公网IP/` 改成 `https://服务器公网IP/`，会导致 SSL 错误。可以尝试：
+
+- 确认地址栏输入的是 `http://`
+- 使用无痕窗口
+- 换浏览器
+- 清理该 IP 的站点缓存
+
+## 本地开发
+
+本地开发需要：
+
+- Python 3.11
+- Node.js 18+
+- npm
+
+安装后端依赖：
 
 ```powershell
-Set-Location "d:\声影随行\backend"
+cd backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-### 2. 前端依赖
+安装前端依赖：
 
 ```powershell
-Set-Location "d:\声影随行\frontend"
+cd ..\frontend
 npm install
 ```
 
-## 日常启动步骤（完整）
-
-也可以直接使用脚本一键启动（推荐）：
+启动本地服务：
 
 ```powershell
-Set-Location "d:\声影随行"
+cd ..
 .\scripts\start_all.ps1
 ```
 
-如需启动后自动打开孩子页和家长页，可加：
-
-```powershell
-Set-Location "d:\声影随行"
-.\scripts\start_all.ps1 -OpenBrowser
-```
-
-## Docker 部署
-
-项目已经提供 Docker 配置：
-
-1. `backend/Dockerfile`：FastAPI 后端镜像
-2. `frontend/Dockerfile`：Vue 构建 + Nginx 静态服务
-3. `frontend/nginx.conf`：同源反代 `/api/` 和 `/uploads/`
-4. `docker-compose.yml`：一键启动前后端
-
-### 本地 Docker 运行
-
-先准备后端环境变量：
-
-```powershell
-Set-Location "d:\声影随行"
-Copy-Item backend\.env.example backend\.env -ErrorAction SilentlyContinue
-notepad backend\.env
-```
-
-至少填写：
-
-```env
-DASHSCOPE_API_KEY=你的DashScope Key
-MOCK_MODE=false
-DASHSCOPE_TTS_PROXY_URL=
-DASHSCOPE_COMPATIBLE_PROXY_URL=
-CPOLAR_AUTO_TUNNEL=false
-PUBLIC_ASSET_BASE_URL=http://localhost
-```
-
-启动：
-
-```powershell
-Set-Location "d:\声影随行"
-docker compose up -d --build
-```
-
-访问：
-
-1. 孩子端：http://localhost/
-2. 父母端：http://localhost/parent
-3. 后端文档：http://localhost/docs
-4. 后端接口：http://localhost/api/
-5. 上传资源：http://localhost/uploads/
-
-停止：
-
-```powershell
-docker compose down
-```
-
-查看日志：
-
-```powershell
-docker compose logs -f backend
-docker compose logs -f frontend
-```
-
-### 云服务器 Docker 部署
-
-云服务器上推荐使用域名和 HTTPS。假设域名是：
+本地访问：
 
 ```text
-https://your-domain.com
+孩子端：http://127.0.0.1:5173/
+父母端：http://127.0.0.1:5174/
+后端文档：http://127.0.0.1:8001/docs
 ```
 
-后端 `.env` 建议：
+本地 Vite 开发服务器需要把 `/api` 和 `/uploads` 代理到后端 `8001`。如果本地前端接口失败，可以在本机的 `frontend/vite.config.ts` 中加入下面的开发代理配置：
 
-```env
-DASHSCOPE_API_KEY=你的DashScope Key
-MOCK_MODE=false
-DATA_DIR=/app/data
-PUBLIC_ASSET_BASE_URL=https://your-domain.com
-CPOLAR_AUTO_TUNNEL=false
-DASHSCOPE_IGNORE_ENV_PROXY=true
-DASHSCOPE_TTS_PROXY_URL=
-DASHSCOPE_COMPATIBLE_PROXY_URL=
+```ts
+proxy: {
+  '/api': 'http://127.0.0.1:8001',
+  '/uploads': 'http://127.0.0.1:8001'
+}
 ```
 
-说明：
+这段配置只用于本地开发。云服务器部署版依赖 `frontend/nginx.conf` 做反向代理，因此远程仓库可以不提交本地 Vite 代理改动。
 
-1. `PUBLIC_ASSET_BASE_URL` 很重要。声纹注册时 DashScope 需要公网可访问的样本音频 URL，Docker 云部署时应填你的公网域名。
-2. 云服务器默认不走代理；如果直连 DashScope 失败，再填写 `DASHSCOPE_TTS_PROXY_URL` 和 `DASHSCOPE_COMPATIBLE_PROXY_URL`。
-3. 当前 compose 会把后端数据放到 Docker volume `backend_data`，容器重建不会丢数据。
-4. 如果服务器 80 端口已经被 Nginx/Caddy 占用，可以把 `docker-compose.yml` 里的前端端口改成 `"8080:80"`，再由宿主机 Nginx/Caddy 反代到 `127.0.0.1:8080`。
-
-### 1. 启动后端（端口 8001）
+停止本地服务：
 
 ```powershell
-Set-Location "d:\声影随行\backend"
-.\.venv\Scripts\Activate.ps1
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8001 --app-dir "d:\声影随行\backend"
+.\scripts\stop_all.ps1
 ```
 
-### 2. 启动孩子端前端（5173）
+## 数据文件
 
-```powershell
-Set-Location "d:\声影随行\frontend"
-npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
+后端默认使用 JSON 文件保存数据：
+
+```text
+backend/data/conversations.json    AI 对话记录
+backend/data/analyses.json         心理分析记录
+backend/data/reports.json          日报缓存
+backend/data/voices.json           已注册人声
+backend/data/mailbox.json          留言箱消息
+backend/data/mailbox_clears.json   双端留言清空状态
+backend/data/parent_styles.json    父母端回复设定
+backend/data/uploads/              上传文件和生成音频
 ```
 
-### 3. 启动父母端前端（5174）
-
-```powershell
-Set-Location "d:\声影随行\frontend"
-npm run dev -- --host 127.0.0.1 --port 5174 --strictPort
-```
-
-### 4. 访问地址
-
-1. 孩子端：http://127.0.0.1:5173/
-2. 父母端：http://127.0.0.1:5174/
-3. 后端文档：http://127.0.0.1:8001/docs
-4. 健康检查：http://127.0.0.1:8001/health
-
-## 声音克隆流程（无公网环境）
-
-1. 打开父母端并进入人声注册区域。
-2. 输入人声名称，上传音频样本（建议 10 秒以上，单人清晰录音）。
-3. 点击注册后，后端会自动：
-	- 拉起 cpolar 内网穿透
-	- 获取公网 URL
-	- 将样本 URL 提交到 DashScope 完成声纹注册
-4. 也可以直接打开麦克风录音，停止后前端会自动转成 `.wav` 再注册。
-5. 注册成功后，会在“已注册人声列表”看到新 voice，孩子端声音下拉框会轮询更新。
-
-说明：默认 `CPOLAR_KILL_EXISTING=false`，不会主动杀掉所有 cpolar 进程，避免影响已有隧道；如果明确希望启动新隧道前清理旧进程，可在 `.env` 中改成 `true`。
-
-## 父母端回复设定
-
-父母端有“回复设定”区域：
-
-1. 勾选“使用默认家长语气”：使用 `backend/app/main.py` 里的 `PARENT_STYLE_RULES`。
-2. 取消勾选并输入自定义提示词：孩子端后续 AI 聊天会使用自定义规则。
-3. 设定保存到 `backend/data/parent_styles.json`。
-4. 如果自定义规则写“像孩子的爸爸”或“自称爸爸”，后端自称规范化会倾向“爸爸”；写“妈妈”则倾向“妈妈”；默认模式使用“爸爸妈妈”。
-
-## 代理配置
-
-默认不走代理：
-
-```env
-DASHSCOPE_IGNORE_ENV_PROXY=true
-DASHSCOPE_TTS_PROXY_URL=
-DASHSCOPE_COMPATIBLE_PROXY_URL=
-```
-
-含义：
-
-1. `DASHSCOPE_IGNORE_ENV_PROXY=true`：调用 DashScope 时忽略系统里的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 等环境变量。
-2. `DASHSCOPE_TTS_PROXY_URL`：只控制 CosyVoice TTS websocket 语音合成。留空表示直连。
-3. `DASHSCOPE_COMPATIBLE_PROXY_URL`：控制文本、视觉、图片相关的 OpenAI-compatible 请求。留空表示直连。
-
-如果云服务器上确实需要代理，可以显式配置：
-
-```env
-DASHSCOPE_TTS_PROXY_URL=http://127.0.0.1:7897
-DASHSCOPE_COMPATIBLE_PROXY_URL=http://127.0.0.1:7897
-```
-
-也可以填远程代理，例如：
-
-```env
-DASHSCOPE_TTS_PROXY_URL=http://proxy.example.com:7897
-DASHSCOPE_COMPATIBLE_PROXY_URL=http://proxy.example.com:7897
-```
-
-注意：只有在对应代理服务真实可用时才填写；否则语音合成可能出现 websocket 建连失败。
-
-## 留言箱
-
-1. 孩子端和父母端都有留言箱。
-2. 支持文字留言和麦克风语音留言。
-3. 不支持本地上传音频文件到留言箱。
-4. 双端会轮询刷新，发送新内容后自动滚动到底部。
-5. 孩子端清空留言只影响孩子端视图，父母端清空留言只影响父母端视图。
-
-## 服务停止
-
-优先使用脚本停止：
-
-```powershell
-Set-Location "d:\声影随行"
-.\scripts\stop_all.ps1 -StopCpolar
-```
-
-其中 `-StopCpolar` 可选；不传时只停止前后端。
-
-1. 在运行 uvicorn 的终端按 Ctrl+C
-2. 在运行 Vite 的终端按 Ctrl+C
-
-如果忘记在哪个终端启动，可用以下命令强制释放端口：
-
-```powershell
-$p = Get-NetTCPConnection -LocalPort 8001 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess
-if ($p) { Stop-Process -Id $p -Force }
-
-$p2 = Get-NetTCPConnection -LocalPort 5173 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess
-if ($p2) { Stop-Process -Id $p2 -Force }
-
-$p3 = Get-NetTCPConnection -LocalPort 5174 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess
-if ($p3) { Stop-Process -Id $p3 -Force }
-```
-
-## 清空行为与确认弹窗
-
-前端对以下操作统一采用应用内二次确认弹窗：
-
-1. 清空历史记录：文案为“确定要清空历史记录吗？”
-2. 清空留言：文案为“确定要清空留言吗？”
-
-确认后才会调用对应接口执行清空。
-
-### 清空历史记录接口行为
-
-前端点击“清空历史记录”会调用 `POST /api/history/reset`，并执行：
-
-1. 清空 `conversations`、`analyses`、`reports`
-2. 删除 AI 聊天、图片夸夸、人声合成等相关上传/生成文件
-3. 保留留言箱引用的语音文件，避免留言箱播放失效
-
-## 环境变量（backend/.env）
-
-核心项如下：
-
-1. DASHSCOPE_API_KEY：DashScope API Key
-2. DASHSCOPE_TEXT_MODEL：默认 qwen3.5-flash
-3. DASHSCOPE_VISION_MODEL：默认 qwen3-vl-flash
-4. DASHSCOPE_TTS_MODEL：默认 cosyvoice-v3.5-flash
-5. DASHSCOPE_TTS_INSTRUCTION：朗读风格指令
-6. DASHSCOPE_TTS_SEED：语音稳定随机种子
-7. DASHSCOPE_TTS_RETRY_ATTEMPTS：语音失败重试次数
-8. DASHSCOPE_TTS_MIN_AUDIO_BYTES：最小音频体积阈值
-9. DASHSCOPE_TTS_PROXY_URL：TTS websocket 代理地址，默认空，表示不走代理
-10. DASHSCOPE_COMPATIBLE_PROXY_URL：文本/视觉 OpenAI-compatible 请求代理地址，默认空，表示不走代理
-11. DASHSCOPE_VOICE_PREFIX：声纹 ID 前缀
-12. PUBLIC_ASSET_BASE_URL：部署公网地址（已配置时优先使用）
-13. CPOLAR_AUTO_TUNNEL：未配置 PUBLIC_ASSET_BASE_URL 时是否自动拉起 cpolar（默认 true）
-14. CPOLAR_KILL_EXISTING：启动新隧道前是否自动清理旧 cpolar 进程（默认 false）
-15. CPOLAR_PATH：cpolar 可执行文件路径
-16. CPOLAR_START_TIMEOUT_SEC：等待 cpolar 返回公网地址的超时时间（秒）
-17. PARENT_PERSONA：基础家长人格设定
-18. MOCK_MODE：false 为真实调用，true 为本地兜底
-19. DATA_DIR：数据目录，默认 ./data
-
-## API 概览
-
-1. POST /api/chat：聊天回复（可选心理分析/场景图）
-2. POST /api/praise-image：图片夸夸
-3. GET /api/report/daily：每日心理日报
-4. POST /api/voice/enroll：注册声纹
-5. GET /api/voice/list：获取已注册人声列表
-6. DELETE /api/voice/{voice_id}：删除指定人声
-7. POST /api/voice/synthesize：文本转语音
-8. GET /api/conversations/today：获取当天会话
-9. POST /api/history/reset：清空历史数据
-10. GET /api/mailbox：获取留言箱
-11. POST /api/mailbox：发送留言
-12. POST /api/mailbox/clear：清空当前端留言视图
-13. GET /api/parent-style：获取父母端回复设定
-14. POST /api/parent-style：保存父母端回复设定
+Docker 部署时，后端数据目录映射到 Docker volume `backend_data`，容器重建不会丢失数据。
 
 ## 常见问题
 
-1. 后端无法启动：先检查 8001 是否被占用，再重启。
-2. 前端端口：孩子端固定 5173，父母端固定 5174；如果端口被占用，先运行 `scripts/stop_all.ps1` 再启动。
-3. 声纹注册失败：通常是 cpolar 未启动成功、样本 URL 无法公网访问，或音频质量不足。
-4. 视觉或语音偶发失败：优先检查 DashScope 配额、限流和模型开通状态；如果你显式配置了代理，再检查代理是否可用。
-5. 若报错包含 `ERR_CPOLAR_108`：表示 cpolar 会话超限，重试一次即可（后端会自动清理旧会话）。
-6. 回复没有声音：先看 `backend/uvicorn.err.log` 是否有 TTS websocket 失败；也可以用 `POST /api/voice/synthesize` 单独测试人声。
-7. 背景图没有出现：检查 `/api/chat` 返回里是否有 `scene_image_url`；远程图失败时后端会返回本地 SVG 兜底。
-8. 自定义爸爸/妈妈语气不生效：确认父母端没有勾选“使用默认家长语气”，并点击保存设定。
-9. 云服务器部署：国内云服务器建议先保持代理为空直连 DashScope；只有直连失败时再配置代理。
+### 1. 不填 API Key 会怎样？
 
-## 安全建议
+如果没有配置 `DASHSCOPE_API_KEY`，后端会进入 mock 模式。普通聊天会返回模板回复，但图片理解、人声注册和语音合成不能正常使用。
 
-1. 不要提交真实 .env 到仓库
-2. API Key 泄漏后立即在平台旋转
+### 2. 声纹注册失败怎么办？
+
+先检查：
+
+- `DASHSCOPE_API_KEY` 是否正确
+- `MOCK_MODE=false`
+- `PUBLIC_ASSET_BASE_URL` 是否是公网可访问地址
+- 服务器 80 端口是否开放
+- 上传音频是否为可用 `.wav` 样本
+
+可以在服务器测试上传资源访问：
+
+```bash
+curl -I http://服务器公网IP/uploads/文件名.wav
+```
+
+### 3. 前端能打开，但接口失败怎么办？
+
+在服务器测试：
+
+```bash
+curl "http://127.0.0.1/api/voice/list?child_id=default-child"
+docker-compose logs --tail=100 backend
+docker-compose logs --tail=100 frontend
+```
+
+如果本机可以访问但浏览器不行，检查浏览器是否强制升级到 HTTPS，或是否有代理/VPN 干扰。
+
+### 4. 前端更新后浏览器还是旧效果怎么办？
+
+可以强制刷新页面，或临时加查询参数：
+
+```text
+http://服务器公网IP/?v=2
+http://服务器公网IP/parent?v=2
+```
+
+新用户首次访问一般会直接加载服务器上的最新前端文件。
+
+## 开源组件说明
+
+本项目使用 Vue 3、Vite、TypeScript、FastAPI、Uvicorn、Pydantic、python-dotenv、python-multipart、OpenAI Python SDK、DashScope SDK、Nginx、Docker 等开源组件作为基础开发与部署依赖。项目调用的阿里云 DashScope 模型服务属于外部云服务能力，不作为项目内置开源代码。
